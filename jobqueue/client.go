@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -42,8 +42,8 @@ import (
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/docker/docker/client"
 	"github.com/gofrs/uuid"
-	"github.com/inconshreveable/log15"
 	"github.com/ugorji/go/codec"
+	"github.com/wtsi-ssg/wr/clog"
 	"github.com/wtsi-ssg/wr/container"
 	"github.com/wtsi-ssg/wr/container/docker"
 	"github.com/wtsi-ssg/wr/fs/local"
@@ -143,7 +143,6 @@ type Client struct {
 	host       string
 	port       string
 	args       []string // allowing internal reconnects
-	log15.Logger
 }
 
 // envStr holds the []string from os.Environ(), for codec compatibility.
@@ -228,9 +227,6 @@ func Connect(addr, caFile, certDomain string, token []byte, timeout time.Duratio
 		args:     []string{addr, caFile, certDomain},
 	}
 
-	c.Logger = log15.New()
-	c.Logger.SetHandler(log15.DiscardHandler())
-
 	// Dial succeeds even when there's no server up, so we test the connection
 	// works with a Ping()
 	si, err := c.Ping(timeout)
@@ -254,8 +250,8 @@ func Connect(addr, caFile, certDomain string, token []byte, timeout time.Duratio
 // available in the environment (config files and environment variables). To
 // load the correct config, a deployment must be provided ('production' or
 // 'development', whichever was used when starting the server).
-func ConnectUsingConfig(deployment string, timeout time.Duration, logger log15.Logger) (*Client, error) {
-	config := internal.ConfigLoad(deployment, false, logger)
+func ConnectUsingConfig(ctx context.Context, deployment string, timeout time.Duration) (*Client, error) {
+	config := internal.ConfigLoadFromCurrentDir(ctx, deployment)
 
 	token, err := os.ReadFile(config.ManagerTokenFile)
 	if err != nil {
@@ -277,9 +273,9 @@ func (c *Client) Disconnect() error {
 // running client methods (currently only Execute() tells you about connection
 // issues, letting you understand why it might not seem to be doing anything as
 // it tries to reconnect). By default, these messages are discarded.
-func (c *Client) SetLogger(logger log15.Logger) {
-	c.Logger = logger
-}
+// func (c *Client) SetLogger(logger log15.Logger) {
+// 	c.Logger = logger
+// }
 
 // Ping tells you if your connection to the server is working, returning static
 // information about the server. If err is nil, it works. This is the only
@@ -532,7 +528,6 @@ func (c *Client) ReserveScheduled(timeout time.Duration, schedulerGroup string) 
 // immediately return an error. NB: the peak RAM tracking assumes we are running
 // on a modern linux system with /proc/*/smaps.
 func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
-	logger := c.Logger.New("job", job.Key())
 	// quickly check upfront that we Reserve()d the job; this isn't required
 	// for other methods since the server does this check and returns an error,
 	// but in this case we want to avoid starting to execute the command before
@@ -619,14 +614,14 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 					defer wkbsMutex.RUnlock()
 					whenKilledByServer()
 					touchTicker.Stop()
-					logger.Warn("kill requested externally")
+					clog.Warn(ctx, "kill requested externally")
 					stopChecking <- true
 					return
 				}
 				if errf != nil {
 					// we may have lost contact with the manager; this is OK. We
 					// will keep trying to touch until it works
-					logger.Warn("could not touch", "err", errf)
+					clog.Warn(ctx, "could not touch", "err", errf)
 					continue
 				}
 			case <-stopTouching:
@@ -1362,7 +1357,7 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 	}
 	for {
 		if time.Now().After(retryEnd) {
-			logger.Warn("giving up trying to connect to server")
+			clog.Warn(ctx, "giving up trying to connect to server")
 			break
 		}
 
@@ -1371,7 +1366,7 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 			// connect attempt
 			newC, errc := Connect(c.args[0], c.args[1], c.args[2], c.token, 1*time.Second)
 			if errc != nil {
-				logger.Warn("tried to reconnect to server but failed", "err", errc)
+				clog.Warn(ctx, "tried to reconnect to server but failed", "err", errc)
 
 				// keep retrying after a jittered sleep
 				wait := ClientRetryWait + time.Duration(rand.Float64()*0.5*float64(ClientRetryWait))
@@ -1381,7 +1376,7 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 
 			// server is back, update ourselves and continue (we keep the quick
 			// timeout, but that should be good enough just to get through this)
-			logger.Info("reconnected to server")
+			clog.Info(ctx, "reconnected to server")
 			disconnected = false
 			c.Lock()
 			c.sock = newC.sock
@@ -1398,7 +1393,7 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 			err = c.Archive(job, jes)
 		}
 		if err != nil {
-			logger.Error("failed to update server with cmd's final state", "err", err)
+			clog.Error(ctx, "failed to update server with cmd's final state", "err", err)
 			hadProblems = true
 
 			if !disconnected {
@@ -1406,7 +1401,7 @@ func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
 				if errd == nil || strings.Contains(errd.Error(), "connection closed") {
 					disconnected = true
 				} else {
-					logger.Warn("failed to disconnect", "err", errd)
+					clog.Warn(ctx, "failed to disconnect", "err", errd)
 				}
 			}
 

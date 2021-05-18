@@ -1,4 +1,4 @@
-// Copyright © 2016-2018 Genome Research Limited
+// Copyright © 2016-2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -21,11 +21,13 @@ package jobqueue
 // This file contains the web interface code of the server.
 
 import (
+	"context"
 	"embed"
 	"net/http"
 	"strings"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/queue"
@@ -109,7 +111,7 @@ type JStatus struct {
 
 // webInterfaceStatic is a http handler for our static documents in the static
 // folder of the source code repository, which are embedded at compile time.
-func webInterfaceStatic(s *Server) http.HandlerFunc {
+func webInterfaceStatic(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// our home page is /status.html
 		path := r.URL.Path
@@ -128,7 +130,7 @@ func webInterfaceStatic(s *Server) http.HandlerFunc {
 		path = "static/" + path
 		doc, err := staticFS.ReadFile(path)
 		if err != nil {
-			s.Warn("not found", "err", err)
+			clog.Warn(ctx, "not found", "err", err)
 			http.NotFound(w, r)
 			return
 		}
@@ -157,7 +159,7 @@ func webInterfaceStatic(s *Server) http.HandlerFunc {
 
 		_, err = w.Write(doc)
 		if err != nil {
-			s.Error("web interface static document write failed", "err", err)
+			clog.Error(ctx, "web interface static document write failed", "err", err)
 		}
 	}
 }
@@ -178,7 +180,7 @@ func webSocket(w http.ResponseWriter, r *http.Request) (*websocket.Conn, bool) {
 
 // webInterfaceStatusWS reads from and writes to the websocket on the status
 // webpage
-func webInterfaceStatusWS(s *Server) http.HandlerFunc {
+func webInterfaceStatusWS(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -187,7 +189,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 
 		conn, ok := webSocket(w, r)
 		if !ok {
-			s.Error("Failed to set up websocket", "Host", r.Host)
+			clog.Error(ctx, "Failed to set up websocket", "Host", r.Host)
 			return
 		}
 
@@ -203,10 +205,10 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 		// go routine to read client requests and respond to them
 		go func(conn *websocket.Conn, connStorageName string, stop chan bool) {
 			// log panics and die
-			defer internal.LogPanic(s.Logger, "jobqueue websocket client handling", true)
+			defer internal.LogPanic(ctx, "jobqueue websocket client handling", true)
 
 			defer func() {
-				s.closeWebSocketConnection(connStorageName)
+				s.closeWebSocketConnection(ctx, connStorageName)
 
 				// stop the other goroutines
 				close(stop)
@@ -225,7 +227,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					switch req.Request {
 					case "current":
 						// get all current jobs
-						jobs := s.getJobsCurrent(0, "", false, false)
+						jobs := s.getJobsCurrent(ctx, 0, "", false, false)
 						writeMutex.Lock()
 						err := webInterfaceStatusSendGroupStateCount(conn, "+all+", jobs)
 						if err != nil {
@@ -274,7 +276,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 						// *** probably want to take the count as a req option,
 						// so user can request to see more than just 1 job per
 						// State+Exitcode+FailReason
-						jobs, _, errstr := s.getJobsByRepGroup(req.RepGroup, false, 1, req.State, true, true)
+						jobs, _, errstr := s.getJobsByRepGroup(ctx, req.RepGroup, false, 1, req.State, true, true)
 						if errstr == "" && len(jobs) > 0 {
 							writeMutex.Lock()
 							failed := false
@@ -299,7 +301,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					case "retry":
 						jobs := s.reqToJobs(req, []queue.ItemState{queue.ItemStateBury})
 						for _, job := range jobs {
-							err := s.q.Kick(job.Key())
+							err := s.q.Kick(ctx, job.Key())
 							if err != nil {
 								continue
 							}
@@ -315,21 +317,21 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 							// dependencies, as *queue would regard that as
 							// satisfying the dependency and downstream jobs
 							// would start
-							hasDeps, err := s.q.HasDependents(key)
+							hasDeps, err := s.q.HasDependents(ctx, key)
 							if err != nil || hasDeps {
 								continue
 							}
 
-							err = s.q.Remove(key)
+							err = s.q.Remove(ctx, key)
 							if err != nil {
-								s.Warn("failed to remove job", "cmd", job.Cmd, "err", err)
+								clog.Warn(ctx, "failed to remove job", "cmd", job.Cmd, "err", err)
 								continue
 							}
-							s.db.deleteLiveJob(key)
-							s.Debug("removed job", "cmd", job.Cmd)
+							s.db.deleteLiveJob(ctx, key)
+							clog.Debug(ctx, "removed job", "cmd", job.Cmd)
 							toDelete = append(toDelete, key)
 							if job.State == JobStateReady {
-								s.decrementGroupCount(job.getSchedulerGroup(), 1)
+								s.decrementGroupCount(ctx, job.getSchedulerGroup(), 1)
 							}
 						}
 						s.rpl.Lock()
@@ -340,9 +342,9 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					case "kill":
 						jobs := s.reqToJobs(req, []queue.ItemState{queue.ItemStateRun})
 						for _, job := range jobs {
-							_, err := s.killJob(job.Key())
+							_, err := s.killJob(ctx, job.Key())
 							if err != nil {
-								s.Warn("web interface kill job failed", "err", err)
+								clog.Warn(ctx, "web interface kill job failed", "err", err)
 							}
 						}
 					case "confirmBadServer":
@@ -352,9 +354,9 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 							delete(s.badServers, req.ServerID)
 							s.bsmutex.Unlock()
 							if server != nil && server.IsBad() {
-								err := server.Destroy()
+								err := server.Destroy(ctx)
 								if err != nil {
-									s.Warn("web interface confirm bad server destruction failed", "err", err)
+									clog.Warn(ctx, "web interface confirm bad server destruction failed", "err", err)
 								}
 							}
 						}
@@ -372,7 +374,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 						continue
 					}
 				case req.Key != "":
-					jobs, _, errstr := s.getJobsByKeys([]string{req.Key}, true, true)
+					jobs, _, errstr := s.getJobsByKeys(ctx, []string{req.Key}, true, true)
 					if errstr == "" && len(jobs) == 1 {
 						status, err := jobs[0].ToStatus()
 						if err != nil {
@@ -392,7 +394,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 		// go routines to push changes to the client
 		go func(conn *websocket.Conn, stop chan bool) {
 			// log panics and die
-			defer internal.LogPanic(s.Logger, "jobqueue websocket status updating", true)
+			defer internal.LogPanic(ctx, "jobqueue websocket status updating", true)
 
 			statusReceiver := s.statusCaster.Join()
 			defer statusReceiver.Close()
@@ -406,7 +408,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					err := conn.WriteJSON(status)
 					writeMutex.Unlock()
 					if err != nil {
-						s.Warn("status updater failed to send JSON to client", "err", err)
+						clog.Warn(ctx, "status updater failed to send JSON to client", "err", err)
 						return
 					}
 				}
@@ -414,7 +416,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 		}(conn, stopper)
 
 		go func(conn *websocket.Conn, stop chan bool) {
-			defer internal.LogPanic(s.Logger, "jobqueue websocket bad server updating", true)
+			defer internal.LogPanic(ctx, "jobqueue websocket bad server updating", true)
 
 			badserverReceiver := s.badServerCaster.Join()
 			defer badserverReceiver.Close()
@@ -428,7 +430,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					err := conn.WriteJSON(server)
 					writeMutex.Unlock()
 					if err != nil {
-						s.Warn("bad server caster failed to send JSON to client", "err", err)
+						clog.Warn(ctx, "bad server caster failed to send JSON to client", "err", err)
 						return
 					}
 				}
@@ -436,7 +438,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 		}(conn, stopper)
 
 		go func(conn *websocket.Conn, stop chan bool) {
-			defer internal.LogPanic(s.Logger, "jobqueue websocket scheduler issue updating", true)
+			defer internal.LogPanic(ctx, "jobqueue websocket scheduler issue updating", true)
 
 			schedIssueReceiver := s.schedCaster.Join()
 			defer schedIssueReceiver.Close()
@@ -450,7 +452,7 @@ func webInterfaceStatusWS(s *Server) http.HandlerFunc {
 					err := conn.WriteJSON(si)
 					writeMutex.Unlock()
 					if err != nil {
-						s.Warn("scheduler issues caster failed to send JSON to client", "err", err)
+						clog.Warn(ctx, "scheduler issues caster failed to send JSON to client", "err", err)
 						return
 					}
 				}

@@ -1,4 +1,4 @@
-// Copyright © 2016, 2018, 2019 Genome Research Limited
+// Copyright © 2016, 2018, 2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package queue
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -37,6 +38,8 @@ type changedStruct struct {
 }
 
 func TestQueue(t *testing.T) {
+	ctx := context.Background()
+
 	Convey("Adding multiple items with a delay to fresh queues always works", t, func() {
 		done := make(chan bool, 1)
 		go func() {
@@ -48,11 +51,11 @@ func TestQueue(t *testing.T) {
 		}()
 		go func() {
 			for l := 0; l < 1000; l++ {
-				queue := New("myqueue")
+				queue := New(ctx, "myqueue")
 				for i := 0; i < 10; i++ {
 					key := fmt.Sprintf("key_%d", i)
 					t := time.Duration((i+1)*100) * time.Millisecond
-					_, erra := queue.Add(key, "", "data", 0, t, 0*time.Millisecond, "")
+					_, erra := queue.Add(ctx, key, "", "data", 0, t, 0*time.Millisecond, "")
 					if erra != nil {
 						done <- false
 					}
@@ -72,11 +75,11 @@ func TestQueue(t *testing.T) {
 		}()
 		go func() {
 			for l := 0; l < 1000; l++ {
-				queue := New("myqueue")
+				queue := New(ctx, "myqueue")
 				for i := 0; i < 10; i++ {
 					key := fmt.Sprintf("key_%d", i)
 					t := time.Duration((i+1)*100) * time.Millisecond
-					_, erra := queue.Add(key, "", "data", 0, 0*time.Millisecond, t, "")
+					_, erra := queue.Add(ctx, key, "", "data", 0, 0*time.Millisecond, t, "")
 					if erra != nil {
 						fmt.Printf("\nqueue.Add() failed: %s\n", erra)
 						done <- false
@@ -96,7 +99,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Once 10 items of differing delay and ttr have been added to the queue", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
 		var callBackLock sync.Mutex
@@ -194,7 +197,7 @@ func TestQueue(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			key := fmt.Sprintf("key_%d", i)
 			t := time.Duration((i+1)*100) * time.Millisecond
-			item, err := queue.Add(key, "", "data", 0, t, t, "")
+			item, err := queue.Add(ctx, key, "", "data", 0, t, t, "")
 			So(err, ShouldBeNil)
 			items[key] = item
 		}
@@ -233,7 +236,7 @@ func TestQueue(t *testing.T) {
 		})
 
 		Convey("You can't add the same item again", func() {
-			item, err := queue.Add("key_0", "", "data new", 0, 100*time.Millisecond, 100*time.Millisecond, "")
+			item, err := queue.Add(ctx, "key_0", "", "data new", 0, 100*time.Millisecond, 100*time.Millisecond, "")
 			qerr, ok := err.(Error)
 			So(ok, ShouldBeTrue)
 			So(qerr.Err, ShouldEqual, ErrAlreadyExists)
@@ -264,7 +267,7 @@ func TestQueue(t *testing.T) {
 			callBackLock.Lock()
 			enableWaitForReadyAdded = true
 			callBackLock.Unlock()
-			queue.TriggerReadyAddedCallback()
+			queue.TriggerReadyAddedCallback(ctx)
 			<-waitForReadyAdded
 			callBackLock.Lock()
 			So(numReadyAdded, ShouldEqual, 3)
@@ -308,7 +311,7 @@ func TestQueue(t *testing.T) {
 					So(item1.State(), ShouldEqual, ItemStateRun)
 					So(item1.releases, ShouldEqual, 0)
 					prepareToCheckChanged()
-					err := queue.Release(item1.Key)
+					err := queue.Release(ctx, item1.Key)
 					So(err, ShouldBeNil)
 					So(checkChanged(SubQueueRun, SubQueueDelay, 1), ShouldBeTrue)
 					So(item1.State(), ShouldEqual, ItemStateDelay)
@@ -344,7 +347,7 @@ func TestQueue(t *testing.T) {
 
 							err = queue.SetDelay(item1.Key, 20*time.Millisecond)
 							So(err, ShouldBeNil)
-							err = queue.Release(item1.Key)
+							err = queue.Release(ctx, item1.Key)
 							So(err, ShouldBeNil)
 							So(item1.State(), ShouldEqual, ItemStateDelay)
 							So(item1.releases, ShouldEqual, 2)
@@ -360,7 +363,7 @@ func TestQueue(t *testing.T) {
 							So(err, ShouldBeNil)
 							So(item1, ShouldNotBeNil)
 							So(item1.Key, ShouldEqual, "key_0")
-							err = queue.Release(item1.Key)
+							err = queue.Release(ctx, item1.Key)
 							So(err, ShouldBeNil)
 							So(item1.State(), ShouldEqual, ItemStateDelay)
 							So(item1.releases, ShouldEqual, 2)
@@ -379,7 +382,7 @@ func TestQueue(t *testing.T) {
 				Convey("Or remove them", func() {
 					So(item2.State(), ShouldEqual, ItemStateRun)
 					prepareToCheckChanged()
-					err := queue.Remove(item2.Key)
+					err := queue.Remove(ctx, item2.Key)
 					So(err, ShouldBeNil)
 					So(checkChanged(SubQueueRun, SubQueueRemoved, 1), ShouldBeTrue)
 					So(item2.State(), ShouldEqual, ItemStateRemoved)
@@ -391,7 +394,7 @@ func TestQueue(t *testing.T) {
 					So(stats.Running, ShouldEqual, 2)
 
 					Convey("Releasing, touching, burying, kicking and updating fail after removal", func() {
-						err := queue.Release(item2.Key)
+						err := queue.Release(ctx, item2.Key)
 						So(err, ShouldNotBeNil)
 						qerr, ok := err.(Error)
 						So(ok, ShouldBeTrue)
@@ -406,12 +409,12 @@ func TestQueue(t *testing.T) {
 						qerr, ok = err.(Error)
 						So(ok, ShouldBeTrue)
 						So(qerr.Err, ShouldEqual, ErrNotFound)
-						err = queue.Kick(item2.Key)
+						err = queue.Kick(ctx, item2.Key)
 						So(err, ShouldNotBeNil)
 						qerr, ok = err.(Error)
 						So(ok, ShouldBeTrue)
 						So(qerr.Err, ShouldEqual, ErrNotFound)
-						err = queue.Update(item2.Key, "", item2.Data(), 0, 0*time.Second, 0*time.Second)
+						err = queue.Update(ctx, item2.Key, "", item2.Data(), 0, 0*time.Second, 0*time.Second)
 						So(err, ShouldNotBeNil)
 						qerr, ok = err.(Error)
 						So(ok, ShouldBeTrue)
@@ -444,7 +447,7 @@ func TestQueue(t *testing.T) {
 					Convey("Once buried you can kick them", func() {
 						So(item3.kicks, ShouldEqual, 0)
 						prepareToCheckChanged()
-						err := queue.Kick(item3.Key)
+						err := queue.Kick(ctx, item3.Key)
 						So(err, ShouldBeNil)
 						So(checkChanged(SubQueueBury, SubQueueReady, 1), ShouldBeTrue)
 						So(item3.State(), ShouldEqual, ItemStateReady)
@@ -460,7 +463,7 @@ func TestQueue(t *testing.T) {
 
 					Convey("You can also remove them whilst buried", func() {
 						prepareToCheckChanged()
-						err := queue.Remove("key_2")
+						err := queue.Remove(ctx, "key_2")
 						So(err, ShouldBeNil)
 						So(checkChanged(SubQueueBury, SubQueueRemoved, 1), ShouldBeTrue)
 
@@ -471,7 +474,7 @@ func TestQueue(t *testing.T) {
 						So(stats.Running, ShouldEqual, 2)
 						So(stats.Buried, ShouldEqual, 0)
 
-						err = queue.Remove("key_2")
+						err = queue.Remove(ctx, "key_2")
 						So(err, ShouldNotBeNil)
 						qerr, ok := err.(Error)
 						So(ok, ShouldBeTrue)
@@ -480,7 +483,7 @@ func TestQueue(t *testing.T) {
 				})
 
 				Convey("If not buried you can't kick them", func() {
-					err := queue.Kick(item3.Key)
+					err := queue.Kick(ctx, item3.Key)
 					So(err, ShouldNotBeNil)
 					qerr, ok := err.(Error)
 					So(ok, ShouldBeTrue)
@@ -592,11 +595,11 @@ func TestQueue(t *testing.T) {
 				})
 
 				Convey("Touching doesn't mess with the correct queue order", func() {
-					queue = New("new queue")
+					queue = New(ctx, "new queue")
 					defer qdestroy(queue)
-					_, erra := queue.Add("item1", "", "data", 0, 0*time.Millisecond, 50*time.Millisecond, "")
+					_, erra := queue.Add(ctx, "item1", "", "data", 0, 0*time.Millisecond, 50*time.Millisecond, "")
 					So(erra, ShouldBeNil)
-					_, erra = queue.Add("item2", "", "data", 0, 0*time.Millisecond, 52*time.Millisecond, "")
+					_, erra = queue.Add(ctx, "item2", "", "data", 0, 0*time.Millisecond, 52*time.Millisecond, "")
 					So(erra, ShouldBeNil)
 					<-time.After(1 * time.Millisecond)
 					item1, erra := queue.Reserve("", 0)
@@ -634,7 +637,7 @@ func TestQueue(t *testing.T) {
 					So(stats.Running, ShouldEqual, 0)
 					So(stats.Buried, ShouldEqual, 0)
 
-					_, err = queue.Add("fake", "", "data", 0, 0*time.Second, 0*time.Second, "")
+					_, err = queue.Add(ctx, "fake", "", "data", 0, 0*time.Second, 0*time.Second, "")
 					So(err, ShouldNotBeNil)
 					qerr, ok := err.(Error)
 					So(ok, ShouldBeTrue)
@@ -644,7 +647,7 @@ func TestQueue(t *testing.T) {
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
 					So(qerr.Err, ShouldEqual, ErrQueueClosed)
-					err = queue.Update("fake", "", "data", 0, 0*time.Second, 0*time.Second)
+					err = queue.Update(ctx, "fake", "", "data", 0, 0*time.Second, 0*time.Second)
 					So(err, ShouldNotBeNil)
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
@@ -664,7 +667,7 @@ func TestQueue(t *testing.T) {
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
 					So(qerr.Err, ShouldEqual, ErrQueueClosed)
-					err = queue.Release("fake")
+					err = queue.Release(ctx, "fake")
 					So(err, ShouldNotBeNil)
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
@@ -674,12 +677,12 @@ func TestQueue(t *testing.T) {
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
 					So(qerr.Err, ShouldEqual, ErrQueueClosed)
-					err = queue.Kick("fake")
+					err = queue.Kick(ctx, "fake")
 					So(err, ShouldNotBeNil)
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
 					So(qerr.Err, ShouldEqual, ErrQueueClosed)
-					err = queue.Remove("fake")
+					err = queue.Remove(ctx, "fake")
 					So(err, ShouldNotBeNil)
 					qerr, ok = err.(Error)
 					So(ok, ShouldBeTrue)
@@ -699,7 +702,7 @@ func TestQueue(t *testing.T) {
 			})
 
 			Convey("If not reserved you can't release, touch, bury or kick them", func() {
-				err := queue.Release("key_0")
+				err := queue.Release(ctx, "key_0")
 				So(err, ShouldNotBeNil)
 				qerr, ok := err.(Error)
 				So(ok, ShouldBeTrue)
@@ -714,7 +717,7 @@ func TestQueue(t *testing.T) {
 				qerr, ok = err.(Error)
 				So(ok, ShouldBeTrue)
 				So(qerr.Err, ShouldEqual, ErrNotRunning)
-				err = queue.Kick("key_0")
+				err = queue.Kick(ctx, "key_0")
 				So(err, ShouldNotBeNil)
 				qerr, ok = err.(Error)
 				So(ok, ShouldBeTrue)
@@ -722,7 +725,7 @@ func TestQueue(t *testing.T) {
 			})
 
 			Convey("But you can remove them when ready", func() {
-				err := queue.Remove("key_0")
+				err := queue.Remove(ctx, "key_0")
 				So(err, ShouldBeNil)
 
 				stats := queue.Stats()
@@ -732,7 +735,7 @@ func TestQueue(t *testing.T) {
 				So(stats.Running, ShouldEqual, 0)
 				So(stats.Buried, ShouldEqual, 0)
 
-				err = queue.Remove("key_0")
+				err = queue.Remove(ctx, "key_0")
 				So(err, ShouldNotBeNil)
 				qerr, ok := err.(Error)
 				So(ok, ShouldBeTrue)
@@ -750,7 +753,7 @@ func TestQueue(t *testing.T) {
 		})
 
 		Convey("But you can remove them when not ready", func() {
-			err := queue.Remove("key_0")
+			err := queue.Remove(ctx, "key_0")
 			So(err, ShouldBeNil)
 
 			stats := queue.Stats()
@@ -760,7 +763,7 @@ func TestQueue(t *testing.T) {
 			So(stats.Running, ShouldEqual, 0)
 			So(stats.Buried, ShouldEqual, 0)
 
-			err = queue.Remove("key_0")
+			err = queue.Remove(ctx, "key_0")
 			So(err, ShouldNotBeNil)
 			qerr, ok := err.(Error)
 			So(ok, ShouldBeTrue)
@@ -769,14 +772,14 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Once an item been added to the queue", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
-		item, err := queue.Add("item1", "", "data", 0, 50*time.Millisecond, 50*time.Millisecond, "")
+		item, err := queue.Add(ctx, "item1", "", "data", 0, 50*time.Millisecond, 50*time.Millisecond, "")
 		So(err, ShouldBeNil)
 
 		Convey("It can be removed from the queue immediately prior to it getting switched to the ready queue", func() {
 			<-time.After(49 * time.Millisecond)
-			err = queue.Remove("item1")
+			err = queue.Remove(ctx, "item1")
 			So(err, ShouldBeNil)
 			<-time.After(6 * time.Millisecond)
 			So(item.State(), ShouldEqual, ItemStateRemoved)
@@ -787,7 +790,7 @@ func TestQueue(t *testing.T) {
 			So(stats.Ready, ShouldEqual, 0)
 
 			Convey("Once removed it can't be updated", func() {
-				err = queue.Update("item1", "", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
+				err = queue.Update(ctx, "item1", "", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
 				So(err, ShouldNotBeNil)
 				qerr, ok := err.(Error)
 				So(ok, ShouldBeTrue)
@@ -812,7 +815,7 @@ func TestQueue(t *testing.T) {
 			So(item.State(), ShouldEqual, ItemStateDelay)
 			<-time.After(25 * time.Millisecond)
 			So(item.State(), ShouldEqual, ItemStateDelay)
-			err = queue.Update("item1", "", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
+			err = queue.Update(ctx, "item1", "", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
 			So(err, ShouldBeNil)
 			<-time.After(30 * time.Millisecond)
 			So(item.State(), ShouldEqual, ItemStateDelay)
@@ -820,13 +823,13 @@ func TestQueue(t *testing.T) {
 			So(item.State(), ShouldEqual, ItemStateReady)
 
 			Convey("When ready the priority can be updated", func() {
-				err = queue.Update("item1", "", "data", 1, 75*time.Millisecond, 50*time.Millisecond)
+				err = queue.Update(ctx, "item1", "", "data", 1, 75*time.Millisecond, 50*time.Millisecond)
 				So(err, ShouldBeNil)
 				So(item.priority, ShouldEqual, 1)
 			})
 
 			Convey("When ready the ReserveGroup can be changed with Update()", func() {
-				err = queue.Update("item1", "newGroup", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
+				err = queue.Update(ctx, "item1", "newGroup", "data", 0, 75*time.Millisecond, 50*time.Millisecond)
 				So(err, ShouldBeNil)
 				So(item.ReserveGroup, ShouldEqual, "newGroup")
 			})
@@ -858,7 +861,7 @@ func TestQueue(t *testing.T) {
 
 			Convey("It can be removed from the queue immediately prior to it getting switched to the ready queue", func() {
 				<-time.After(49 * time.Millisecond)
-				err = queue.Remove("item1")
+				err = queue.Remove(ctx, "item1")
 				So(err, ShouldBeNil)
 				<-time.After(6 * time.Millisecond)
 				So(item.State(), ShouldEqual, ItemStateRemoved)
@@ -893,7 +896,7 @@ func TestQueue(t *testing.T) {
 				So(item.State(), ShouldEqual, ItemStateRun)
 				<-time.After(25 * time.Millisecond)
 				So(item.State(), ShouldEqual, ItemStateRun)
-				err := queue.Update("item1", "", "data", 0, 50*time.Millisecond, 75*time.Millisecond)
+				err := queue.Update(ctx, "item1", "", "data", 0, 50*time.Millisecond, 75*time.Millisecond)
 				So(err, ShouldBeNil)
 				<-time.After(30 * time.Millisecond)
 				So(item.State(), ShouldEqual, ItemStateRun)
@@ -904,15 +907,15 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can add items to the queue that start in the run or bury sub-queues", t, func() {
-		queue := New("run/bury queue")
+		queue := New(ctx, "run/bury queue")
 		defer func() {
 			errd := queue.Destroy()
 			So(errd, ShouldBeNil)
 		}()
 
-		_, err := queue.Add("key_run", "", "data", 0, 100*time.Millisecond, 100*time.Millisecond, SubQueueRun)
+		_, err := queue.Add(ctx, "key_run", "", "data", 0, 100*time.Millisecond, 100*time.Millisecond, SubQueueRun)
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_bury", "", "data", 0, 100*time.Millisecond, 100*time.Millisecond, SubQueueBury)
+		_, err = queue.Add(ctx, "key_bury", "", "data", 0, 100*time.Millisecond, 100*time.Millisecond, SubQueueBury)
 		So(err, ShouldBeNil)
 
 		stats := queue.Stats()
@@ -933,15 +936,15 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can add items to the queue that have sizes", t, func() {
-		queue := New("size queue")
+		queue := New(ctx, "size queue")
 		defer func() {
 			errd := queue.Destroy()
 			So(errd, ShouldBeNil)
 		}()
 
-		_, err := queue.Add("key_normal", "", "data", 0, 0*time.Millisecond, 100*time.Millisecond, "")
+		_, err := queue.Add(ctx, "key_normal", "", "data", 0, 0*time.Millisecond, 100*time.Millisecond, "")
 		So(err, ShouldBeNil)
-		_, err = queue.AddWithSize("key_large", "", "data", 0, 1, 0*time.Millisecond, 100*time.Millisecond, "")
+		_, err = queue.AddWithSize(ctx, "key_large", "", "data", 0, 1, 0*time.Millisecond, 100*time.Millisecond, "")
 		So(err, ShouldBeNil)
 
 		stats := queue.Stats()
@@ -958,7 +961,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Once a thousand items with no delay have been added to the queue", t, func() {
-		queue := New("1000 queue")
+		queue := New(ctx, "1000 queue")
 		defer qdestroy(queue)
 		type testdata struct {
 			ID int
@@ -966,7 +969,7 @@ func TestQueue(t *testing.T) {
 		for i := 0; i < 1000; i++ {
 			key := fmt.Sprintf("key_%d", i)
 			dataid := rand.Intn(999)
-			_, err := queue.Add(key, "", &testdata{ID: dataid}, 0, 0*time.Second, 30*time.Second, "")
+			_, err := queue.Add(ctx, key, "", &testdata{ID: dataid}, 0, 0*time.Second, 30*time.Second, "")
 			So(err, ShouldBeNil)
 		}
 
@@ -992,7 +995,7 @@ func TestQueue(t *testing.T) {
 					So(stats.Delayed, ShouldEqual, 0)
 					So(stats.Ready, ShouldEqual, 0)
 					So(stats.Running, ShouldEqual, 1000)
-					err := queue.Release("key_0")
+					err := queue.Release(ctx, "key_0")
 					So(err, ShouldBeNil)
 					stats = queue.Stats()
 					So(stats.Items, ShouldEqual, 1000)
@@ -1033,7 +1036,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Once a thousand items with no delay and differing ReserveGroups have been added to the queue", t, func() {
-		queue := New("1000 queue")
+		queue := New(ctx, "1000 queue")
 		defer qdestroy(queue)
 		type testdata struct {
 			ID int
@@ -1043,7 +1046,7 @@ func TestQueue(t *testing.T) {
 			key := fmt.Sprintf("key_%d", i)
 			dataid := rand.Intn(999)
 			dataids = append(dataids, dataid)
-			_, err := queue.Add(key, fmt.Sprintf("%d", dataid), &testdata{ID: dataid}, 0, 0*time.Second, 30*time.Second, "")
+			_, err := queue.Add(ctx, key, fmt.Sprintf("%d", dataid), &testdata{ID: dataid}, 0, 0*time.Second, 30*time.Second, "")
 			So(err, ShouldBeNil)
 		}
 
@@ -1090,12 +1093,12 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Once a thousand items with a small delay have been added to the queue", t, func() {
-		queue := New("1000 queue")
+		queue := New(ctx, "1000 queue")
 		defer qdestroy(queue)
 		t := time.Now()
 		for i := 0; i < 1000; i++ {
 			key := fmt.Sprintf("key_%d", i)
-			_, err := queue.Add(key, "", "data", 0, 100*time.Millisecond, 30*time.Second, "")
+			_, err := queue.Add(ctx, key, "", "data", 0, 100*time.Millisecond, 30*time.Second, "")
 			So(err, ShouldBeNil)
 		}
 		e := time.Since(t)
@@ -1131,7 +1134,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can add many items to the queue in one go", t, func() {
-		q := New("myqueue")
+		q := New(ctx, "myqueue")
 		defer qdestroy(q)
 
 		item, err := q.Reserve("", 0)
@@ -1152,12 +1155,12 @@ func TestQueue(t *testing.T) {
 			})
 		}
 
-		added, dups, err := q.AddMany(itemdefs)
+		added, dups, err := q.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 10)
 		So(dups, ShouldEqual, 0)
 
-		added, dups, err = q.AddMany(itemdefs)
+		added, dups, err = q.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 0)
 		So(dups, ShouldEqual, 10)
@@ -1172,7 +1175,7 @@ func TestQueue(t *testing.T) {
 			})
 		}
 
-		added, dups, err = q.AddMany(itemdefs)
+		added, dups, err = q.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 10)
 		So(dups, ShouldEqual, 10)
@@ -1184,7 +1187,7 @@ func TestQueue(t *testing.T) {
 			Delay:    0 * time.Millisecond,
 			TTR:      1 * time.Minute,
 		})
-		added, dups, err = q.AddMany(itemdefs)
+		added, dups, err = q.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 1)
 		So(dups, ShouldEqual, 20)
@@ -1192,7 +1195,7 @@ func TestQueue(t *testing.T) {
 		Convey("It doesn't work if the queue is closed", func() {
 			err = q.Destroy()
 			So(err, ShouldBeNil)
-			_, _, err = q.AddMany(itemdefs)
+			_, _, err = q.AddMany(ctx, itemdefs)
 			So(err, ShouldNotBeNil)
 			qerr, ok := err.(Error)
 			So(ok, ShouldBeTrue)
@@ -1201,7 +1204,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can add many items to the queue that start in the run or bury sub-queues, all in one go", t, func() {
-		queue := New("run/bury queue")
+		queue := New(ctx, "run/bury queue")
 		defer func() {
 			errd := queue.Destroy()
 			So(errd, ShouldBeNil)
@@ -1222,12 +1225,12 @@ func TestQueue(t *testing.T) {
 			}
 		}
 
-		added, dups, err := queue.AddMany(itemdefs)
+		added, dups, err := queue.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 20)
 		So(dups, ShouldEqual, 0)
 
-		added, dups, err = queue.AddMany(itemdefs)
+		added, dups, err = queue.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 0)
 		So(dups, ShouldEqual, 20)
@@ -1251,43 +1254,43 @@ func TestQueue(t *testing.T) {
 
 	Convey("Once some items with dependencies have been added to the queue", t, func() {
 		// https://i-msdn.sec.s-msft.com/dynimg/IC332764.gif
-		queue := New("dep queue")
+		queue := New(ctx, "dep queue")
 		defer qdestroy(queue)
-		_, err := queue.Add("key_1", "", "1", 0, 0*time.Second, 30*time.Second, "")
+		_, err := queue.Add(ctx, "key_1", "", "1", 0, 0*time.Second, 30*time.Second, "")
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_2", "", "2", 0, 0*time.Second, 30*time.Second, "")
+		_, err = queue.Add(ctx, "key_2", "", "2", 0, 0*time.Second, 30*time.Second, "")
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_3", "", "3", 0, 0*time.Second, 30*time.Second, "")
+		_, err = queue.Add(ctx, "key_3", "", "3", 0, 0*time.Second, 30*time.Second, "")
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_4", "", "4", 0, 0*time.Second, 30*time.Second, "", []string{"key_1"})
+		_, err = queue.Add(ctx, "key_4", "", "4", 0, 0*time.Second, 30*time.Second, "", []string{"key_1"})
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_5", "five", "5", 0, 0*time.Second, 30*time.Second, "", []string{"key_1", "key_2", "key_3"})
+		_, err = queue.Add(ctx, "key_5", "five", "5", 0, 0*time.Second, 30*time.Second, "", []string{"key_1", "key_2", "key_3"})
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_6", "", "6", 0, 0*time.Second, 30*time.Second, "", []string{"key_3", "key_4"})
+		_, err = queue.Add(ctx, "key_6", "", "6", 0, 0*time.Second, 30*time.Second, "", []string{"key_3", "key_4"})
 		So(err, ShouldBeNil)
-		fivesixdep, err := queue.Add("key_7", "", "7", 0, 0*time.Second, 30*time.Second, "", []string{"key_5", "key_6"})
+		fivesixdep, err := queue.Add(ctx, "key_7", "", "7", 0, 0*time.Second, 30*time.Second, "", []string{"key_5", "key_6"})
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key_8", "", "8", 0, 0*time.Second, 30*time.Second, "", []string{"key_5"})
+		_, err = queue.Add(ctx, "key_8", "", "8", 0, 0*time.Second, 30*time.Second, "", []string{"key_5"})
 		So(err, ShouldBeNil)
 
 		So(fivesixdep.Dependencies(), ShouldResemble, []string{"key_5", "key_6"})
 
 		Convey("Only the non-dependent items are immediately ready", func() {
-			depTestFunc(queue, false)
+			depTestFunc(ctx, queue, false)
 		})
 
 		Convey("HasDependents works", func() {
-			hasDeps, err := queue.HasDependents("key_8")
+			hasDeps, err := queue.HasDependents(ctx, "key_8")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeFalse)
-			hasDeps, err = queue.HasDependents("key_2")
+			hasDeps, err = queue.HasDependents(ctx, "key_2")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeTrue)
 
-			err = queue.Remove("key_5")
+			err = queue.Remove(ctx, "key_5")
 			So(err, ShouldBeNil)
 
-			hasDeps, err = queue.HasDependents("key_2")
+			hasDeps, err = queue.HasDependents(ctx, "key_2")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeFalse)
 		})
@@ -1298,16 +1301,16 @@ func TestQueue(t *testing.T) {
 			fourStats := four.Stats()
 			So(four.Dependencies(), ShouldResemble, []string{"key_1"})
 			So(fourStats.State, ShouldEqual, ItemStateDependent)
-			hasDeps, err := queue.HasDependents("key_1")
+			hasDeps, err := queue.HasDependents(ctx, "key_1")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeTrue)
 
-			err = queue.Update("key_4", "", four.Data(), fourStats.Priority, fourStats.Delay, fourStats.TTR, []string{})
+			err = queue.Update(ctx, "key_4", "", four.Data(), fourStats.Priority, fourStats.Delay, fourStats.TTR, []string{})
 			So(err, ShouldBeNil)
 
 			So(four.Dependencies(), ShouldResemble, []string{})
 			So(four.Stats().State, ShouldEqual, ItemStateReady)
-			hasDeps, err = queue.HasDependents("key_1")
+			hasDeps, err = queue.HasDependents(ctx, "key_1")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeTrue)
 
@@ -1317,43 +1320,43 @@ func TestQueue(t *testing.T) {
 			So(five.Dependencies(), ShouldResemble, []string{"key_1", "key_2", "key_3"})
 			So(fiveStats.State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_3"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_3"})
 			So(err, ShouldBeNil)
 
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateDependent)
 
 			So(five.Dependencies(), ShouldResemble, []string{"key_2", "key_3"})
-			hasDeps, err = queue.HasDependents("key_1")
+			hasDeps, err = queue.HasDependents(ctx, "key_1")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeFalse)
 
-			err = queue.Remove("key_2")
+			err = queue.Remove(ctx, "key_2")
 			So(err, ShouldBeNil)
-			err = queue.Remove("key_3")
+			err = queue.Remove(ctx, "key_3")
 			So(err, ShouldBeNil)
 			<-time.After(6 * time.Millisecond)
 
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateReady)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
 			So(err, ShouldBeNil)
 
 			So(five.Dependencies(), ShouldResemble, []string{"key_2", "key_1", "key_3"})
-			hasDeps, err = queue.HasDependents("key_1")
+			hasDeps, err = queue.HasDependents(ctx, "key_1")
 			So(err, ShouldBeNil)
 			So(hasDeps, ShouldBeTrue)
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_3"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_3"})
 			So(err, ShouldBeNil)
 
 			// (you can be dependent on items that do not exist in the queue)
 			So(five.Stats().State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
 			So(err, ShouldBeNil)
 			So(five.Stats().State, ShouldEqual, ItemStateReady)
 
@@ -1363,13 +1366,13 @@ func TestQueue(t *testing.T) {
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateRun)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
 			So(err, ShouldBeNil)
 
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
 			So(err, ShouldBeNil)
 
 			So(five.Stats().State, ShouldEqual, ItemStateReady)
@@ -1380,21 +1383,21 @@ func TestQueue(t *testing.T) {
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateRun)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, 1*time.Second, fiveStats.TTR, []string{})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, 1*time.Second, fiveStats.TTR, []string{})
 			So(err, ShouldBeNil)
 
-			err = queue.Release(five.Key)
+			err = queue.Release(ctx, five.Key)
 			So(err, ShouldBeNil)
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateDelay)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_2", "key_1", "key_3"})
 			So(err, ShouldBeNil)
 
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{})
 			So(err, ShouldBeNil)
 
 			So(five.Stats().State, ShouldEqual, ItemStateReady)
@@ -1409,16 +1412,16 @@ func TestQueue(t *testing.T) {
 			fiveStats = five.Stats()
 			So(fiveStats.State, ShouldEqual, ItemStateBury)
 
-			err = queue.Update("key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_1"})
+			err = queue.Update(ctx, "key_5", "five", five.Data(), fiveStats.Priority, fiveStats.Delay, fiveStats.TTR, []string{"key_1"})
 			So(err, ShouldBeNil)
 
 			So(five.Stats().State, ShouldEqual, ItemStateBury)
 
-			err = queue.Kick(five.Key)
+			err = queue.Kick(ctx, five.Key)
 			So(err, ShouldBeNil)
 			So(five.Stats().State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Remove("key_1")
+			err = queue.Remove(ctx, "key_1")
 			So(err, ShouldBeNil)
 			<-time.After(6 * time.Millisecond)
 
@@ -1455,19 +1458,19 @@ func TestQueue(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(item.Key, ShouldEqual, "changed_3")
 
-			depTestFunc(queue, true)
+			depTestFunc(ctx, queue, true)
 		})
 
 		Convey("You can add dependencies on non-exist items and resolve them later", func() {
-			ten, err := queue.Add("key_10", "", "10", 0, 0*time.Second, 30*time.Second, "", []string{"key_9"})
+			ten, err := queue.Add(ctx, "key_10", "", "10", 0, 0*time.Second, 30*time.Second, "", []string{"key_9"})
 			So(err, ShouldBeNil)
 			So(ten.Stats().State, ShouldEqual, ItemStateDependent)
 
-			_, err = queue.Add("key_9", "", "9", 0, 0*time.Second, 30*time.Second, "", []string{})
+			_, err = queue.Add(ctx, "key_9", "", "9", 0, 0*time.Second, 30*time.Second, "", []string{})
 			So(err, ShouldBeNil)
 			So(ten.Stats().State, ShouldEqual, ItemStateDependent)
 
-			err = queue.Remove("key_9")
+			err = queue.Remove(ctx, "key_9")
 			So(err, ShouldBeNil)
 			<-time.After(6 * time.Millisecond)
 
@@ -1477,7 +1480,7 @@ func TestQueue(t *testing.T) {
 
 	Convey("Once some items with dependencies have been added to the queue en-masse", t, func() {
 		// same setup as in previous test
-		queue := New("dep many queue")
+		queue := New(ctx, "dep many queue")
 		defer qdestroy(queue)
 
 		var itemdefs []*ItemDef
@@ -1498,7 +1501,7 @@ func TestQueue(t *testing.T) {
 		itemdefs = append(itemdefs, &ItemDef{"key_7", "", "7", 0, 0 * time.Second, 30 * time.Second, "", []string{"key_5", "key_6"}})
 		itemdefs = append(itemdefs, &ItemDef{"key_8", "", "8", 0, 0 * time.Second, 30 * time.Second, "", []string{"key_5"}})
 
-		added, dups, err := queue.AddMany(itemdefs)
+		added, dups, err := queue.AddMany(ctx, itemdefs)
 		So(err, ShouldBeNil)
 		So(added, ShouldEqual, 8)
 		So(dups, ShouldEqual, 0)
@@ -1508,12 +1511,12 @@ func TestQueue(t *testing.T) {
 		So(item7.Dependencies(), ShouldResemble, []string{"key_5", "key_6"})
 
 		Convey("Only the non-dependent items are immediately ready", func() {
-			depTestFunc(queue, false)
+			depTestFunc(ctx, queue, false)
 		})
 	})
 
 	Convey("When you add items to the queue over time, slow readyAddedCallbacks only get called once at a time", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
 		var callBackLock sync.RWMutex
@@ -1527,7 +1530,7 @@ func TestQueue(t *testing.T) {
 
 		for i := 0; i < 10; i++ {
 			key := fmt.Sprintf("key_%d", i)
-			_, err := queue.Add(key, "", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+			_, err := queue.Add(ctx, key, "", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 			So(err, ShouldBeNil)
 			if i == 0 {
 				time.Sleep(5 * time.Millisecond)
@@ -1555,7 +1558,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can reserve with a wait time, reserving before items are even added", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
 		stats := queue.Stats()
@@ -1568,12 +1571,12 @@ func TestQueue(t *testing.T) {
 		addErrCh := make(chan error)
 		go func() {
 			<-time.After(5 * time.Millisecond)
-			_, err := queue.Add("key1", "bar", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+			_, err := queue.Add(ctx, "key1", "bar", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 			addErrCh <- err
 		}()
 		go func() {
 			<-time.After(20 * time.Millisecond)
-			_, err := queue.Add("key2", "foo", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+			_, err := queue.Add(ctx, "key2", "foo", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 			addErrCh <- err
 		}()
 
@@ -1606,7 +1609,7 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("Multiple clients can reserve with a wait time before items are even added", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
 		stats := queue.Stats()
@@ -1642,7 +1645,7 @@ func TestQueue(t *testing.T) {
 			go func(i int) {
 				<-willReserve[i]
 				<-time.After(2000 * time.Millisecond)
-				_, err := queue.Add(fmt.Sprintf("key%d", i), "foo", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+				_, err := queue.Add(ctx, fmt.Sprintf("key%d", i), "foo", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 				addTimes[i] <- time.Now()
 				addErrCh <- err
 			}(i)
@@ -1655,18 +1658,18 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can reserve with a wait time, reserving before a dependent item becomes ready", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
-		_, err := queue.Add("key1", "one", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+		_, err := queue.Add(ctx, "key1", "one", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key2", "two", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "", []string{"key1"})
+		_, err = queue.Add(ctx, "key2", "two", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "", []string{"key1"})
 		So(err, ShouldBeNil)
 
 		rmErrCh := make(chan error)
 		go func() {
 			<-time.After(20 * time.Millisecond)
-			err := queue.Remove("key1")
+			err := queue.Remove(ctx, "key1")
 			rmErrCh <- err
 		}()
 
@@ -1690,18 +1693,18 @@ func TestQueue(t *testing.T) {
 	})
 
 	Convey("You can reserve with a wait time, reserving before changing an item's reserve group", t, func() {
-		queue := New("myqueue")
+		queue := New(ctx, "myqueue")
 		defer qdestroy(queue)
 
-		_, err := queue.Add("key1", "one", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
+		_, err := queue.Add(ctx, "key1", "one", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "")
 		So(err, ShouldBeNil)
-		_, err = queue.Add("key2", "two", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "", []string{"key1"})
+		_, err = queue.Add(ctx, "key2", "two", "data", 0, 0*time.Millisecond, 10*time.Millisecond, "", []string{"key1"})
 		So(err, ShouldBeNil)
 
 		rmErrCh := make(chan error)
 		go func() {
 			<-time.After(20 * time.Millisecond)
-			err := queue.Remove("key1")
+			err := queue.Remove(ctx, "key1")
 			rmErrCh <- err
 		}()
 
@@ -1740,7 +1743,7 @@ func TestQueue(t *testing.T) {
 	})
 }
 
-func depTestFunc(queue *Queue, changed bool) {
+func depTestFunc(ctx context.Context, queue *Queue, changed bool) {
 	key3 := "key_3"
 	key6 := "key_6"
 	key7 := "key_7"
@@ -1763,7 +1766,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(err, ShouldBeNil)
 		So(item.Stats().State, ShouldEqual, ItemStateDependent)
 
-		err = queue.Remove("key_1")
+		err = queue.Remove(ctx, "key_1")
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 
@@ -1781,7 +1784,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(err, ShouldBeNil)
 		So(item.Stats().State, ShouldEqual, ItemStateDependent)
 
-		err = queue.Remove(key3)
+		err = queue.Remove(ctx, key3)
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 
@@ -1792,7 +1795,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(stats.Ready, ShouldEqual, 2)
 		So(stats.Dependant, ShouldEqual, 4)
 
-		err = queue.Remove("key_4")
+		err = queue.Remove(ctx, "key_4")
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 
@@ -1803,7 +1806,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(stats.Ready, ShouldEqual, 2)
 		So(stats.Dependant, ShouldEqual, 3)
 
-		err = queue.Remove(key6)
+		err = queue.Remove(ctx, key6)
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 
@@ -1816,7 +1819,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(err, ShouldBeNil)
 		So(item.Stats().State, ShouldEqual, ItemStateDependent)
 
-		err = queue.Remove("key_2")
+		err = queue.Remove(ctx, "key_2")
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 
@@ -1834,7 +1837,7 @@ func depTestFunc(queue *Queue, changed bool) {
 		So(err, ShouldBeNil)
 		So(item8.Stats().State, ShouldEqual, ItemStateDependent)
 
-		err = queue.Remove("key_5")
+		err = queue.Remove(ctx, "key_5")
 		So(err, ShouldBeNil)
 		<-time.After(6 * time.Millisecond)
 

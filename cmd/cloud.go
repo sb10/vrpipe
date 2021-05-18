@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -213,6 +213,7 @@ ask your administrator for the appropriate --network_dns settings (or clouddns
 config option) to use; the DNS must be able to resolve the domain name from
 within OpenStack.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		if providerName == "" {
 			die("--provider is required")
 		}
@@ -266,7 +267,7 @@ within OpenStack.`,
 		}
 
 		// for debug purposes, set up logging to STDERR
-		cloudLogger := setupLogging(kubeDebug)
+		setupLogging(kubeDebug)
 
 		// get all necessary cloud resources in place
 		mp, err := strconv.Atoi(config.ManagerPort)
@@ -277,12 +278,13 @@ within OpenStack.`,
 		if err != nil {
 			die("bad manager_web [%s]: %s", config.ManagerWeb, err)
 		}
-		provider, err := cloud.New(providerName, cloudResourceName(cloudResourceNameUniquer), filepath.Join(config.ManagerDir, "cloud_resources."+providerName), cloudLogger)
+		provider, err := cloud.New(ctx, providerName, cloudResourceName(cloudResourceNameUniquer),
+			filepath.Join(config.ManagerDir, "cloud_resources."+providerName))
 		if err != nil {
 			die("failed to connect to %s: %s", providerName, err)
 		}
 		info("please wait while %s resources are created...", providerName)
-		err = provider.Deploy(&cloud.DeployConfig{
+		err = provider.Deploy(ctx, &cloud.DeployConfig{
 			RequiredPorts:  []int{22, mp, wp},
 			GatewayIP:      cloudGatewayIP,
 			CIDR:           cloudCIDR,
@@ -301,7 +303,7 @@ within OpenStack.`,
 		alreadyUp := false
 		servers := provider.Servers()
 		for _, thisServer := range servers {
-			if thisServer.Alive() {
+			if thisServer.Alive(ctx) {
 				usingExistingServer = true
 				server = thisServer
 				info("using existing %s server at %s", providerName, server.IP)
@@ -355,19 +357,19 @@ within OpenStack.`,
 			if managerFlavor == "" {
 				managerFlavor = flavorRegex
 			}
-			flavor, errf := provider.CheapestServerFlavor(1, osRAM, managerFlavor)
+			flavor, errf := provider.CheapestServerFlavor(ctx, 1, osRAM, managerFlavor)
 			if errf != nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to launch a server in %s: %s", providerName, errf)
 			}
-			server, errf = provider.Spawn(osPrefix, osUsername, flavor.ID, osDisk, 0*time.Second, true)
+			server, errf = provider.Spawn(ctx, osPrefix, osUsername, flavor.ID, osDisk, 0*time.Second, true)
 			if errf != nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to launch a server in %s: %s", providerName, errf)
 			}
 			errf = server.WaitUntilReady(context.Background(), cloudConfigFiles, postCreation)
 			if errf != nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to launch a server in %s: %s", providerName, errf)
 			}
 		}
@@ -395,19 +397,19 @@ within OpenStack.`,
 			// teardown
 			err = startForwarding(server.IP, osUsername, keyPath, mp, fmPidPath)
 			if err != nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to set up port forwarding to %s:%d: %s", server.IP, mp, err)
 			}
 			err = startForwarding(server.IP, osUsername, keyPath, wp, fwPidPath)
 			if err != nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to set up port forwarding to %s:%d: %s", server.IP, wp, err)
 			}
 
 			// check that we can now connect to the remote manager
 			jq = connect(40*time.Second, true)
 			if jq == nil {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("could not talk to wr manager on server at %s after 40s", server.IP)
 			}
 
@@ -455,22 +457,24 @@ If you don't back up to S3, the teardown command tries to copy the remote
 database locally, which is only possible while the remote server is still up
 and accessible.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		if providerName == "" {
 			die("--provider is required")
 		}
 
 		// before stopping the manager, make sure we can interact with the
 		// provider - that our credentials are correct
-		logger := setupLogging(kubeDebug)
+		setupLogging(kubeDebug)
 
-		provider, err := cloud.New(providerName, cloudResourceName(cloudResourceNameUniquer), filepath.Join(config.ManagerDir, "cloud_resources."+providerName), logger)
+		provider, err := cloud.New(ctx, providerName, cloudResourceName(cloudResourceNameUniquer),
+			filepath.Join(config.ManagerDir, "cloud_resources."+providerName))
 		if err != nil {
 			die("failed to connect to %s: %s", providerName, err)
 		}
 		headNode := provider.HeadNode()
 		var headNodeKnown bool
 		if headNode != nil {
-			headNodeKnown = headNode.Known()
+			headNodeKnown = headNode.Known(ctx)
 		}
 
 		// now check if the ssh forwarding is up
@@ -489,12 +493,12 @@ and accessible.`,
 				}
 
 				var syncMsg string
-				if internal.IsRemote(config.ManagerDbBkFile) {
-					if _, errf := os.Stat(config.ManagerDbFile); !os.IsNotExist(errf) {
+				if internal.IsRemote(config.ManagerDBBkFile) {
+					if _, errf := os.Stat(config.ManagerDBFile); !os.IsNotExist(errf) {
 						// move aside the local database so that if the manager is
 						// started locally, the database will be restored from S3
 						// and have the history of what was run in the cloud
-						if errf = os.Rename(config.ManagerDbFile, config.ManagerDbFile+".old"); err == nil {
+						if errf = os.Rename(config.ManagerDBFile, config.ManagerDBFile+".old"); err == nil {
 							syncMsg = "; the local database will be updated from S3 if manager started locally"
 						} else {
 							warn("could not rename the local database; if the manager is started locally, it will not be updated with the latest changes in S3! %s", errf)
@@ -507,7 +511,7 @@ and accessible.`,
 					// is "fine"; though some db writes may occur, the user
 					// obviously doesn't care about them. On recovery we won't
 					// break any pipelines.
-					errf := jq.BackupDB(config.ManagerDbFile)
+					errf := jq.BackupDB(config.ManagerDBFile)
 					if errf != nil {
 						msg := "there was an error trying to sync the remote database: " + errf.Error()
 						if forceTearDown {
@@ -552,7 +556,7 @@ and accessible.`,
 		// copy over any manager logs that got created locally (ignore errors,
 		// and overwrite any existing file) *** currently missing the final
 		// shutdown message doing things this way, but ok?...
-		if headNodeKnown && headNode.Alive() {
+		if headNodeKnown && headNode.Alive(ctx) {
 			cloudLogFilePath := config.ManagerLogFile + "." + providerName
 			errf := headNode.DownloadFile(context.Background(), filepath.Join("./.wr_"+config.Deployment, "log"), cloudLogFilePath)
 
@@ -585,7 +589,7 @@ and accessible.`,
 		}
 
 		// teardown cloud resources we created
-		err = provider.TearDown()
+		err = provider.TearDown(ctx)
 		if err != nil {
 			die("failed to delete the cloud resources previously created: %s", err)
 		}
@@ -724,13 +728,14 @@ lost, at which point they will automatically be confirmed dead.`,
 }
 
 func init() {
+	ctx := context.Background()
 	RootCmd.AddCommand(cloudCmd)
 	cloudCmd.AddCommand(cloudDeployCmd)
 	cloudCmd.AddCommand(cloudTearDownCmd)
 	cloudCmd.AddCommand(cloudServersCmd)
 
 	// flags specific to these sub-commands
-	defaultConfig := internal.DefaultConfig(appLogger)
+	defaultConfig := internal.DefaultConfig(ctx)
 	cloudDeployCmd.Flags().StringVarP(&providerName, "provider", "p", "openstack", "['openstack'] cloud provider")
 	cloudDeployCmd.Flags().StringVar(&cloudResourceNameUniquer, "resource_name", realUsername(), fmt.Sprintf("name to be included when naming cloud resources (should be unique to you, max length %d)", maxCloudResourceUsernameLength))
 	cloudDeployCmd.Flags().StringVarP(&osPrefix, "os", "o", defaultConfig.CloudOS, "prefix of name, or ID, of the OS image your servers should use")
@@ -778,7 +783,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	remoteExe := filepath.Join(cloudBinDir, "wr")
 	err := server.UploadFile(ctx, exe, remoteExe)
 	if err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to upload wr to the server at %s: %s", server.IP, err)
 	}
 
@@ -786,24 +791,25 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	// ports that we'd use locally, use the right domain, and have it use an S3
 	// db backup location if configured
 	dbBk := "db_bk"
-	if internal.IsRemote(config.ManagerDbBkFile) {
-		dbBk = config.ManagerDbBkFile
+	if internal.IsRemote(config.ManagerDBBkFile) {
+		dbBk = config.ManagerDBBkFile
 	} else if config.IsProduction() {
 		// copy over our database
-		if _, errf := os.Stat(config.ManagerDbFile); errf == nil {
-			if errf = server.UploadFile(ctx, config.ManagerDbFile, filepath.Join("./.wr_"+config.Deployment, "db")); errf == nil {
+		if _, errf := os.Stat(config.ManagerDBFile); errf == nil {
+			if errf = server.UploadFile(ctx, config.ManagerDBFile,
+				filepath.Join("./.wr_"+config.Deployment, "db")); errf == nil {
 				info("copied local database to remote server")
 			} else if !wrMayHaveStarted {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to upload local database to the server at %s: %s", server.IP, errf)
 			}
 		} else if !os.IsNotExist(errf) {
-			teardown(provider)
+			teardown(ctx, provider)
 			die("failed to access the local database: %s", errf)
 		}
 	}
 	if err = server.CreateFile(ctx, fmt.Sprintf("managerport: \"%d\"\nmanagerweb: \"%d\"\nmanagerdbbkfile: \"%s\"\nmanagercertdomain: \"%s\"\nmanagerumask: %d\n", mp, wp, dbBk, config.ManagerCertDomain, config.ManagerUmask), wrConfigFileName); err != nil {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to create our config file on the server at %s: %s", server.IP, err)
 	}
 
@@ -815,7 +821,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	}
 
 	if _, _, err = server.RunCmd(ctx, "chmod u+x "+remoteExe, false); err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to make remote wr executable: %s", err)
 	}
 
@@ -824,17 +830,18 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	localResourceFile := filepath.Join(config.ManagerDir, "cloud_resources."+providerName+"."+cRN)
 	remoteResourceFile := filepath.Join("./.wr_"+config.Deployment, "cloud_resources."+providerName+"."+cRN)
 	if err = server.UploadFile(ctx, localResourceFile, remoteResourceFile); err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to upload wr cloud resources file to the server at %s: %s", server.IP, err)
 	}
 	localKeyFile := filepath.Join(config.ManagerDir, "cloud_resources."+providerName+".key")
+
 	if err = os.WriteFile(localKeyFile, []byte(provider.PrivateKey()), 0600); err != nil {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to create key file %s: %s", localKeyFile, err)
 	}
 	remoteKeyFile := filepath.Join("./.wr_"+config.Deployment, "cloud_resources."+providerName+".key")
 	if err = server.UploadFile(ctx, localKeyFile, remoteKeyFile); err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to upload wr cloud key file to the server at %s: %s", server.IP, err)
 	}
 	_, _, err = server.RunCmd(ctx, "chmod 600 "+remoteResourceFile, false)
@@ -849,12 +856,12 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	// copy over our ca, cert and key files
 	remoteCertFile := filepath.Join("./.wr_"+config.Deployment, "cert.pem")
 	if err = server.UploadFile(ctx, config.ManagerCertFile, remoteCertFile); err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to upload wr manager certificate file to the server at %s: %s", server.IP, err)
 	}
 	remoteKeyFile = filepath.Join("./.wr_"+config.Deployment, "key.pem")
 	if err = server.UploadFile(ctx, config.ManagerKeyFile, remoteKeyFile); err != nil && !wrMayHaveStarted {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("failed to upload wr manager key file to the server at %s: %s", server.IP, err)
 	}
 	_, _, err = server.RunCmd(ctx, "chmod 600 "+remoteCertFile, false)
@@ -869,7 +876,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	if err == nil {
 		remoteCAFile := filepath.Join("./.wr_"+config.Deployment, "ca.pem")
 		if err = server.UploadFile(ctx, config.ManagerCAFile, remoteCAFile); err != nil && !wrMayHaveStarted {
-			teardown(provider)
+			teardown(ctx, provider)
 			die("failed to upload wr manager CA file to the server at %s: %s", server.IP, err)
 		}
 		_, _, err = server.RunCmd(ctx, "chmod 600 "+remoteCAFile, false)
@@ -904,7 +911,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 		}
 		err = server.CreateFile(ctx, envvarExports, wrEnvFileName)
 		if err != nil {
-			teardown(provider)
+			teardown(ctx, provider)
 			die("failed to create our environment variables file on the server at %s: %s", server.IP, err)
 		}
 		_, _, err = server.RunCmd(ctx, "chmod 600 "+wrEnvFileName, false)
@@ -919,7 +926,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 			remoteScriptFile := filepath.Join("./.wr_"+config.Deployment, "cloud_resources."+providerName+".script")
 			err = server.UploadFile(ctx, postCreationScript, remoteScriptFile)
 			if err != nil && !wrMayHaveStarted {
-				teardown(provider)
+				teardown(ctx, provider)
 				die("failed to upload wr cloud script file to the server at %s: %s", server.IP, err)
 			}
 
@@ -1015,7 +1022,8 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 			if errs != nil && !strings.Contains(errs.Error(), "unexpected newline") {
 				warn("failed to read your response: %s", errs)
 			}
-			teardown(provider)
+
+			teardown(ctx, provider)
 			die("toredown following failure to start the manager remotely")
 		}
 
@@ -1026,7 +1034,7 @@ func bootstrapOnRemote(provider *cloud.Provider, server *cloud.Server, exe strin
 	remoteTokenFile := filepath.Join("./.wr_"+config.Deployment, "client.token")
 	err = server.DownloadFile(ctx, remoteTokenFile, config.ManagerTokenFile)
 	if err != nil {
-		teardown(provider)
+		teardown(ctx, provider)
 		die("could not make a local copy of the authentication token: %s", err)
 	}
 }
@@ -1085,9 +1093,8 @@ func killProcess(pid int) error {
 	return process.Signal(syscall.Signal(9))
 }
 
-func teardown(p *cloud.Provider) {
-	err := p.TearDown()
-	if err != nil {
+func teardown(ctx context.Context, p *cloud.Provider) {
+	if err := p.TearDown(ctx); err != nil {
 		warn("teardown failed: %s", err)
 	}
 }

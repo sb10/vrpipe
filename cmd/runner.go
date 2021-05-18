@@ -1,4 +1,4 @@
-// Copyright © 2016-2018 Genome Research Limited
+// Copyright © 2016-2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -32,6 +32,7 @@ import (
 	"github.com/inconshreveable/log15"
 	"github.com/kardianos/osext"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 // options for this cmd
@@ -71,7 +72,7 @@ complete.`,
 			if err != nil {
 				warn("failed to set up syslog logging: %s", err)
 			} else {
-				appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, handler))
+				clog.ToHandlerAtLevel(handler, "info")
 			}
 		}
 
@@ -101,10 +102,6 @@ complete.`,
 				warn("Disconnecting from the server failed: %s", err)
 			}
 		}()
-
-		if logToSyslog {
-			jq.SetLogger(appLogger)
-		}
 
 		// in case any job we execute has a Cmd that calls `wr add`, we will
 		// override their environment to make that call work
@@ -234,6 +231,7 @@ complete.`,
 }
 
 func init() {
+	ctx := context.Background()
 	RootCmd.AddCommand(runnerCmd)
 
 	// flags specific to this sub-command
@@ -241,7 +239,8 @@ func init() {
 	runnerCmd.Flags().IntVar(&timeoutintRunner, "timeout", 30, "how long (seconds) to wait to get a reply from 'wr manager'")
 	runnerCmd.Flags().IntVarP(&reserveint, "reserve_timeout", "r", 2, "how long (seconds) to wait for there to be a command in the queue, before exiting")
 	runnerCmd.Flags().IntVarP(&maxtime, "max_time", "m", 0, "maximum time (minutes) to run for before exiting; 0 means unlimited")
-	runnerCmd.Flags().StringVar(&rserver, "server", internal.DefaultServer(appLogger), "ip:port of wr manager")
-	runnerCmd.Flags().StringVar(&rdomain, "domain", internal.DefaultConfig(appLogger).ManagerCertDomain, "domain the manager's cert is valid for")
+	runnerCmd.Flags().StringVar(&rserver, "server", internal.DefaultServer(ctx), "ip:port of wr manager")
+	runnerCmd.Flags().StringVar(&rdomain, "domain", internal.DefaultConfig(ctx).ManagerCertDomain,
+		"domain the manager's cert is valid for")
 	runnerCmd.Flags().BoolVar(&logToSyslog, "debug", false, "enable logging to syslog")
 }

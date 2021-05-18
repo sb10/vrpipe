@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -25,6 +25,7 @@ package jobqueue
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -37,11 +38,11 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/muxfys/v4"
 	"github.com/VertebrateResequencing/wr/internal"
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/inconshreveable/log15"
 	"github.com/sb10/waitgroup"
 	"github.com/ugorji/go/codec"
 	bolt "go.etcd.io/bbolt"
@@ -101,10 +102,9 @@ func (s sobsd) Less(i, j int) bool {
 type sobsdStorer func(bucket []byte, encodes sobsd) (err error)
 
 type db struct {
-	backupLast time.Time
-	backupPath string
-	ch         codec.Handle
-	log15.Logger
+	backupLast           time.Time
+	backupPath           string
+	ch                   codec.Handle
 	backupStopWait       chan bool
 	backupMount          *muxfys.MuxFys
 	backupNotification   chan bool
@@ -133,9 +133,7 @@ type db struct {
 //
 // In development we delete any existing db and force a fresh start. Backups
 // are also not carried out, so dbBkFile is ignored.
-func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logger) (*db, string, error) {
-	l := logger.New()
-
+func initDB(ctx context.Context, dbFile string, dbBkFile string, deployment string) (*db, string, error) {
 	var backupsEnabled bool
 	bkPath := dbBkFile
 	var fs *muxfys.MuxFys
@@ -170,7 +168,6 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 				Accessor: accessor,
 				Write:    true,
 			}
-			muxfys.SetLogHandler(l.GetHandler())
 
 			cfg := &muxfys.Config{
 				Mount:   mnt,
@@ -191,11 +188,11 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 	if wipeDevDBOnInit && deployment == internal.Development {
 		errr := os.Remove(dbFile)
 		if errr != nil && !os.IsNotExist(errr) {
-			l.Warn("Failed to remove database file", "path", dbFile, "err", errr)
+			clog.Warn(ctx, "Failed to remove database file", "path", dbFile, "err", errr)
 		}
 		errr = os.Remove(bkPath)
 		if errr != nil && !os.IsNotExist(errr) {
-			l.Warn("Failed to remove database backup file", "path", bkPath, "err", errr)
+			clog.Warn(ctx, "Failed to remove database backup file", "path", bkPath, "err", errr)
 		}
 	}
 
@@ -317,7 +314,6 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 		backupWait:         minimumTimeBetweenBackups,
 		backupStopWait:     make(chan bool),
 		wg:                 waitgroup.New(),
-		Logger:             l,
 	}
 	if fs != nil {
 		dbstruct.backupMount = fs
@@ -373,8 +369,8 @@ func (db *db) storeLimitGroups(limitGroups map[string]int) (changed []string, re
 
 // retrieveLimitGroup gets a value for a particular group from the db that was
 // stored with storeLimitGroups(). If the group wasn't stored, returns -1.
-func (db *db) retrieveLimitGroup(group string) int {
-	v := db.retrieve(bucketLGs, group)
+func (db *db) retrieveLimitGroup(ctx context.Context, group string) int {
+	v := db.retrieve(ctx, bucketLGs, group)
 	if v == nil {
 		return -1
 	}
@@ -401,7 +397,7 @@ func (db *db) retrieveLimitGroup(group string) int {
 // use queue methods to update the job in the queue.
 //
 // Finally, it triggers a background database backup.
-func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, jobsToUpdate []*Job, alreadyAdded int, err error) {
+func (db *db) storeNewJobs(ctx context.Context, jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, jobsToUpdate []*Job, alreadyAdded int, err error) {
 	encodedJobs, rgLookups, dgLookups, rdgLookups, rgs, jobsToQueue, jobsToUpdate, alreadyAdded, err := db.prepareNewJobs(jobs, ignoreAdded)
 
 	if err != nil {
@@ -425,7 +421,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 		db.wgMutex.Lock()
 		wgk := db.wg.Add(1)
 		go func() {
-			defer internal.LogPanic(db.Logger, "jobqueue database storeNewJobs rglookups", true)
+			defer internal.LogPanic(ctx, "jobqueue database storeNewJobs rglookups", true)
 			defer db.wg.Done(wgk)
 			sort.Sort(rgLookups)
 			errors <- db.storeBatched(bucketRTK, rgLookups, db.storeLookups)
@@ -434,7 +430,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 		if len(rgs) > 0 {
 			wgk2 := db.wg.Add(1)
 			go func() {
-				defer internal.LogPanic(db.Logger, "jobqueue database storeNewJobs repGroups", true)
+				defer internal.LogPanic(ctx, "jobqueue database storeNewJobs repGroups", true)
 				defer db.wg.Done(wgk2)
 				sort.Sort(rgs)
 				errors <- db.storeBatched(bucketRGs, rgs, db.storeLookups)
@@ -444,7 +440,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 		if len(dgLookups) > 0 {
 			wgk3 := db.wg.Add(1)
 			go func() {
-				defer internal.LogPanic(db.Logger, "jobqueue database dgLookups", true)
+				defer internal.LogPanic(ctx, "jobqueue database dgLookups", true)
 				defer db.wg.Done(wgk3)
 				sort.Sort(dgLookups)
 				errors <- db.storeBatched(bucketDTK, dgLookups, db.storeLookups)
@@ -454,7 +450,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 		if len(rdgLookups) > 0 {
 			wgk4 := db.wg.Add(1)
 			go func() {
-				defer internal.LogPanic(db.Logger, "jobqueue database storeNewJobs rdgLookups", true)
+				defer internal.LogPanic(ctx, "jobqueue database storeNewJobs rdgLookups", true)
 				defer db.wg.Done(wgk4)
 				sort.Sort(rdgLookups)
 				errors <- db.storeBatched(bucketRDTK, rdgLookups, db.storeLookups)
@@ -463,7 +459,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 
 		wgk5 := db.wg.Add(1)
 		go func() {
-			defer internal.LogPanic(db.Logger, "jobqueue database storeNewJobs encodedJobs", true)
+			defer internal.LogPanic(ctx, "jobqueue database storeNewJobs encodedJobs", true)
 			defer db.wg.Done(wgk5)
 			sort.Sort(encodedJobs)
 			errors <- db.storeBatched(bucketJobsLive, encodedJobs, db.storeEncodedJobs)
@@ -493,7 +489,7 @@ func (db *db) storeNewJobs(jobs []*Job, ignoreAdded bool) (jobsToQueue []*Job, j
 	// silently skipped)
 
 	if err == nil && alreadyAdded != len(jobs) {
-		db.backgroundBackup()
+		db.backgroundBackup(ctx)
 	}
 
 	return jobsToQueue, jobsToUpdate, alreadyAdded, err
@@ -638,7 +634,7 @@ func (db *db) checkIfAdded(key string) (bool, error) {
 //
 // The key you supply must be the key of the job you supply, or bad things will
 // happen - no checking is done! A backgroundBackup() is triggered afterwards.
-func (db *db) archiveJob(key string, job *Job) error {
+func (db *db) archiveJob(ctx context.Context, key string, job *Job) error {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, db.ch)
 	job.RLock()
@@ -688,21 +684,21 @@ func (db *db) archiveJob(key string, job *Job) error {
 		return b.Put([]byte(fmt.Sprintf("%s%s%20d", job.ReqGroup, dbDelimiter, secs)), []byte(strconv.Itoa(secs)))
 	})
 
-	db.backgroundBackup()
+	db.backgroundBackup(ctx)
 
 	return err
 }
 
 // deleteLiveJob remove a job from the live bucket, for use when jobs were
 // added in error.
-func (db *db) deleteLiveJob(key string) {
-	db.remove(bucketJobsLive, key)
-	db.backgroundBackup()
+func (db *db) deleteLiveJob(ctx context.Context, key string) {
+	db.remove(ctx, bucketJobsLive, key)
+	db.backgroundBackup(ctx)
 	//*** we're not removing the lookup entries from the bucket*TK buckets...
 }
 
 // deleteLiveJobs remove multiple jobs from the live bucket.
-func (db *db) deleteLiveJobs(keys []string) error {
+func (db *db) deleteLiveJobs(ctx context.Context, keys []string) error {
 	err := db.bolt.Batch(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketJobsLive)
 		for _, key := range keys {
@@ -718,7 +714,7 @@ func (db *db) deleteLiveJobs(keys []string) error {
 		return err
 	}
 
-	db.backgroundBackup()
+	db.backgroundBackup(ctx)
 	//*** we're not removing the lookup entries from the bucket*TK buckets...
 
 	return nil
@@ -932,13 +928,13 @@ func (db *db) storeEnv(env []byte) (string, error) {
 
 // retrieveEnv gets a value from the db that was stored with storeEnv(). The
 // value may come from the cache, avoiding db access.
-func (db *db) retrieveEnv(envkey string) []byte {
+func (db *db) retrieveEnv(ctx context.Context, envkey string) []byte {
 	cached, got := db.envcache.Get(envkey)
 	if got {
 		return cached.([]byte)
 	}
 
-	envc := db.retrieve(bucketEnvs, envkey)
+	envc := db.retrieve(ctx, bucketEnvs, envkey)
 	db.envcache.Add(envkey, envc)
 	return envc
 }
@@ -961,7 +957,7 @@ func (db *db) retrieveEnv(envkey string) []byte {
 // may be nil even on cmd failure. Since it is not critical to the running of
 // jobs and workflows that this works 100% of the time, we ignore errors and
 // write to bolt in a goroutine, giving us a significant speed boost.
-func (db *db) updateJobAfterExit(job *Job, stdo []byte, stde []byte, forceStorage bool) {
+func (db *db) updateJobAfterExit(ctx context.Context, job *Job, stdo []byte, stde []byte, forceStorage bool) {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, db.ch)
 	db.Lock()
@@ -980,7 +976,7 @@ func (db *db) updateJobAfterExit(job *Job, stdo []byte, stde []byte, forceStorag
 	err := enc.Encode(job)
 	job.RUnlock()
 	if err != nil {
-		db.Error("Database operation updateJobAfterExit failed due to Encode failure", "err", err)
+		clog.Error(ctx, "Database operation updateJobAfterExit failed due to Encode failure", "err", err)
 		return
 	}
 
@@ -990,7 +986,7 @@ func (db *db) updateJobAfterExit(job *Job, stdo []byte, stde []byte, forceStorag
 	defer db.wgMutex.Unlock()
 	wgk := db.wg.Add(1)
 	go func() {
-		defer internal.LogPanic(db.Logger, "updateJobAfterExit", true)
+		defer internal.LogPanic(ctx, "updateJobAfterExit", true)
 
 		err := db.bolt.Batch(func(tx *bolt.Tx) error {
 			key := []byte(jobkey)
@@ -1041,7 +1037,7 @@ func (db *db) updateJobAfterExit(job *Job, stdo []byte, stde []byte, forceStorag
 		})
 		db.wg.Done(wgk)
 		if err != nil {
-			db.Error("Database operation updateJobAfterExit failed", "err", err)
+			clog.Error(ctx, "Database operation updateJobAfterExit failed", "err", err)
 		}
 		db.Lock()
 		db.updatingAfterJobExit--
@@ -1052,7 +1048,7 @@ func (db *db) updateJobAfterExit(job *Job, stdo []byte, stde []byte, forceStorag
 // updateJobAfterChange rewrites the job's entry in the live bucket, to enable
 // complete recovery after a crash. This happens in a goroutine, since it isn't
 // essential this happens, and we benefit from the speed.
-func (db *db) updateJobAfterChange(job *Job) {
+func (db *db) updateJobAfterChange(ctx context.Context, job *Job) {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, db.ch)
 	db.RLock()
@@ -1065,7 +1061,7 @@ func (db *db) updateJobAfterChange(job *Job) {
 	err := enc.Encode(job)
 	job.RUnlock()
 	if err != nil {
-		db.Error("Database operation updateJobAfterChange failed due to Encode failure", "err", err)
+		clog.Error(ctx, "Database operation updateJobAfterChange failed due to Encode failure", "err", err)
 		return
 	}
 
@@ -1073,7 +1069,7 @@ func (db *db) updateJobAfterChange(job *Job) {
 	defer db.wgMutex.Unlock()
 	wgk := db.wg.Add(1)
 	go func() {
-		defer internal.LogPanic(db.Logger, "updateJobAfterChange", true)
+		defer internal.LogPanic(ctx, "updateJobAfterChange", true)
 
 		err := db.bolt.Batch(func(tx *bolt.Tx) error {
 			bjl := tx.Bucket(bucketJobsLive)
@@ -1089,10 +1085,10 @@ func (db *db) updateJobAfterChange(job *Job) {
 		})
 		db.wg.Done(wgk)
 		if err != nil {
-			db.Error("Database operation updateJobAfterChange failed", "err", err)
+			clog.Error(ctx, "Database operation updateJobAfterChange failed", "err", err)
 			return
 		}
-		db.backgroundBackup()
+		db.backgroundBackup(ctx)
 	}()
 }
 
@@ -1106,7 +1102,7 @@ func (db *db) updateJobAfterChange(job *Job) {
 // The order of oldKeys should match the order or new jobs. Ie. oldKeys[0] is
 // the old Key() of jobs[0]. This is so that any stdout/err of old jobs is
 // associated with the new jobs.
-func (db *db) modifyLiveJobs(oldKeys []string, jobs []*Job) error {
+func (db *db) modifyLiveJobs(ctx context.Context, oldKeys []string, jobs []*Job) error {
 	encodedJobs, rgLookups, dgLookups, rdgLookups, rgs, _, _, _, err := db.prepareNewJobs(jobs, false)
 	if err != nil {
 		return err
@@ -1225,17 +1221,17 @@ func (db *db) modifyLiveJobs(oldKeys []string, jobs []*Job) error {
 		return nil
 	})
 	if err != nil {
-		db.Error("Database error during modify", "err", err)
+		clog.Error(ctx, "Database error during modify", "err", err)
 	}
 
-	go db.backgroundBackup()
+	go db.backgroundBackup(ctx)
 
 	return err
 }
 
 // retrieveJobStd gets the values that were stored using updateJobStd() for the
 // given job.
-func (db *db) retrieveJobStd(jobkey string) (stdo []byte, stde []byte) {
+func (db *db) retrieveJobStd(ctx context.Context, jobkey string) (stdo []byte, stde []byte) {
 	// first wait for any existing updateJobAfterExit() calls to complete
 	//*** this method of waiting seems really bad and should be improved, but in
 	//    practice we probably never wait
@@ -1268,7 +1264,7 @@ func (db *db) retrieveJobStd(jobkey string) (stdo []byte, stde []byte) {
 	if err != nil {
 		// impossible, but to keep the linter happy and incase things change in
 		// the future
-		db.Error("Database retrieve failed", "err", err)
+		clog.Error(ctx, "Database retrieve failed", "err", err)
 	}
 	return stdo, stde
 }
@@ -1377,7 +1373,7 @@ func (db *db) store(bucket []byte, key string, val []byte) error {
 
 // retrieve does a basic get of a key from a given bucket. An error isn't
 // possible here.
-func (db *db) retrieve(bucket []byte, key string) []byte {
+func (db *db) retrieve(ctx context.Context, bucket []byte, key string) []byte {
 	var val []byte
 	err := db.bolt.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
@@ -1391,26 +1387,26 @@ func (db *db) retrieve(bucket []byte, key string) []byte {
 	if err != nil {
 		// impossible, but to keep the linter happy and incase things change in
 		// the future
-		db.Error("Database retrieve failed", "err", err)
+		clog.Error(ctx, "Database retrieve failed", "err", err)
 	}
 	return val
 }
 
 // remove does a basic delete of a key from a given bucket. We don't care about
 // errors here.
-func (db *db) remove(bucket []byte, key string) {
+func (db *db) remove(ctx context.Context, bucket []byte, key string) {
 	db.wgMutex.Lock()
 	defer db.wgMutex.Unlock()
 	wgk := db.wg.Add(1)
 	go func() {
-		defer internal.LogPanic(db.Logger, "jobqueue database remove", true)
+		defer internal.LogPanic(ctx, "jobqueue database remove", true)
 		defer db.wg.Done(wgk)
 		err := db.bolt.Batch(func(tx *bolt.Tx) error {
 			b := tx.Bucket(bucket)
 			return b.Delete([]byte(key))
 		})
 		if err != nil {
-			db.Error("Database remove failed", "err", err)
+			clog.Error(ctx, "Database remove failed", "err", err)
 		}
 	}()
 }
@@ -1502,7 +1498,7 @@ func (db *db) putEncodedJobs(tx *bolt.Tx, bucket []byte, encodes sobsd) error {
 // close shuts down the db, should be used prior to exiting. Ensures any
 // ongoing backgroundBackup() completes first (but does not wait for backup() to
 // complete).
-func (db *db) close() error {
+func (db *db) close(ctx context.Context) error {
 	db.Lock()
 	defer db.Unlock()
 	if !db.closed {
@@ -1529,8 +1525,8 @@ func (db *db) close() error {
 
 		// do a final backup
 		if db.backupsEnabled && db.backupQueued {
-			db.Debug("Jobqueue database not backed up, will do final backup")
-			db.backupToBackupFile(false)
+			clog.Debug(ctx, "Jobqueue database not backed up, will do final backup")
+			db.backupToBackupFile(ctx, false)
 		}
 
 		err := db.bolt.Close()
@@ -1555,7 +1551,7 @@ func (db *db) close() error {
 // errors are silently ignored. Spaces out sequential backups so that there is a
 // gap of max(30s, [time taken to complete previous backup]) seconds between
 // them.
-func (db *db) backgroundBackup() {
+func (db *db) backgroundBackup(ctx context.Context) {
 	db.Lock()
 	defer db.Unlock()
 	if db.closed || !db.backupsEnabled {
@@ -1569,7 +1565,7 @@ func (db *db) backgroundBackup() {
 	db.backingUp = true
 	slowBackups := db.slowBackups
 	go func(last time.Time, wait time.Duration, doNotWait bool) {
-		defer internal.LogPanic(db.Logger, "backgroundBackup", true)
+		defer internal.LogPanic(ctx, "backgroundBackup", true)
 
 		if !doNotWait {
 			now := time.Now()
@@ -1591,7 +1587,7 @@ func (db *db) backgroundBackup() {
 		}
 
 		start := time.Now()
-		db.backupToBackupFile(slowBackups)
+		db.backupToBackupFile(ctx, slowBackups)
 
 		db.Lock()
 		db.backingUp = false
@@ -1614,7 +1610,7 @@ func (db *db) backgroundBackup() {
 		if db.backupQueued {
 			db.backupQueued = false
 			db.Unlock()
-			db.backgroundBackup()
+			db.backgroundBackup(ctx)
 		} else {
 			db.Unlock()
 		}
@@ -1623,7 +1619,7 @@ func (db *db) backgroundBackup() {
 
 // backupToBackupFile is used by backgroundBackup() and close() to do the actual
 // backup.
-func (db *db) backupToBackupFile(slowBackups bool) {
+func (db *db) backupToBackupFile(ctx context.Context, slowBackups bool) {
 	// we most likely triggered this backup immediately following an operation
 	// that alters (the important parts of) the database; wait for those
 	// transactions to actually complete before backing up
@@ -1645,18 +1641,18 @@ func (db *db) backupToBackupFile(slowBackups bool) {
 	}
 
 	if err != nil {
-		db.Error("Database backup failed", "err", err)
+		clog.Error(ctx, "Database backup failed", "err", err)
 
 		// if it failed, delete any partial file that got made
 		errr := os.Remove(tmpBackupPath)
 		if errr != nil && !os.IsNotExist(errr) {
-			db.Warn("Removing bad database backup file failed", "path", tmpBackupPath, "err", errr)
+			clog.Warn(ctx, "Removing bad database backup file failed", "path", tmpBackupPath, "err", errr)
 		}
 	} else {
 		// backup succeeded, move it over any old backup
 		errr := os.Rename(tmpBackupPath, db.backupPath)
 		if errr != nil {
-			db.Warn("Renaming new database backup file failed", "source", tmpBackupPath, "dest", db.backupPath, "err", errr)
+			clog.Warn(ctx, "Renaming new database backup file failed", "source", tmpBackupPath, "dest", db.backupPath, "err", errr)
 		}
 	}
 }

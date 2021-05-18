@@ -1,4 +1,4 @@
-// Copyright © 2016-2018 Genome Research Limited
+// Copyright © 2016-2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -21,6 +21,7 @@ package internal
 // this file has general utility functions
 
 import (
+	"context"
 	"crypto/md5" // #nosec not used for security purposes
 	"encoding/hex"
 	"fmt"
@@ -39,8 +40,8 @@ import (
 	"time"
 
 	infoblox "github.com/fanatic/go-infoblox"
-	"github.com/inconshreveable/log15"
 	"github.com/shirou/gopsutil/mem"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 // ZeroCoreMultiplier is the multipler of actual cores we use for the maximum of
@@ -199,11 +200,11 @@ func ProcMeminfoMBs() (int, error) {
 // LogClose is for use to Close() an object during a defer when you don't care
 // if the Close() returns an error, but do want non-EOF errors logged. Extra
 // args are passed as additional context for the logger.
-func LogClose(logger log15.Logger, obj io.Closer, msg string, extra ...interface{}) {
+func LogClose(ctx context.Context, obj io.Closer, msg string, extra ...interface{}) {
 	err := obj.Close()
 	if err != nil && err.Error() != "EOF" {
 		extra = append(extra, "err", err)
-		logger.Warn("failed to close "+msg, extra...)
+		clog.Warn(ctx, "failed to close "+msg, extra...)
 	}
 }
 
@@ -212,9 +213,9 @@ func LogClose(logger log15.Logger, obj io.Closer, msg string, extra ...interface
 // program exits, otherwise it continues, after logging the error message and
 // stack trace. Desc string should be used to describe briefly what the
 // goroutine you call this in does.
-func LogPanic(logger log15.Logger, desc string, die bool) {
+func LogPanic(ctx context.Context, desc string, die bool) {
 	if err := recover(); err != nil {
-		logger.Crit(desc+" panic", "err", err)
+		clog.Crit(ctx, desc+" panic", "err", err)
 		if die {
 			os.Exit(1)
 		}
@@ -354,12 +355,12 @@ func InfobloxSetDomainIP(domain, ip string) error {
 }
 
 // FileMD5 calculates the MD5 hash checksum of a file, returned as HEX encoded.
-func FileMD5(path string, logger log15.Logger) (string, error) {
+func FileMD5(ctx context.Context, path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	defer LogClose(logger, file, "fileMD5", "path", path)
+	defer LogClose(ctx, file, "fileMD5", "path", path)
 
 	h := md5.New() // #nosec not used for security purposes
 

@@ -1,4 +1,4 @@
-// Copyright © 2016-2020 Genome Research Limited
+// Copyright © 2016-2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -35,9 +35,9 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/internal"
-	"github.com/inconshreveable/log15"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -120,7 +120,6 @@ type Server struct {
 	UserName          string // the username needed to log in to the server
 	permanentProblem  string
 	homeDir           string
-	logger            log15.Logger
 	Flavor            *Flavor
 	Disk              int           // GB of available disk space
 	TTD               time.Duration // amount of idle time allowed before destruction
@@ -152,12 +151,11 @@ type Server struct {
 // NewServer returns a Server with the minimal details set needed to SSH to it
 // and use the various SSH-requiring methods. You will need to manually set
 // other properties for other functionality to work.
-func NewServer(username, ip, key string, logger log15.Logger) *Server {
+func NewServer(username, ip, key string) *Server {
 	return &Server{
 		UserName:     username,
 		IP:           ip,
 		PrivateKey:   key,
-		logger:       logger,
 		cancelRunCmd: make(map[int]chan bool),
 	}
 }
@@ -201,7 +199,7 @@ SENTINEL:
 				// behave the same way on all linux variants?
 				_, _, rmErr := s.RunCmd(ctx, "sudo rm "+sentinelFilePath, false)
 				if rmErr != nil {
-					s.logger.Warn("failed to remove sentinel file", "path", sentinelFilePath, "err", rmErr)
+					clog.Warn(ctx, "failed to remove sentinel file", "path", sentinelFilePath, "err", rmErr)
 				}
 				break SENTINEL
 			}
@@ -261,7 +259,7 @@ SENTINEL:
 
 		_, _, rmErr := s.RunCmd(ctx, "rm "+pcsPath, false)
 		if rmErr != nil {
-			s.logger.Warn("failed to remove post creation script", "path", pcsPath, "err", rmErr)
+			clog.Warn(ctx, "failed to remove post creation script", "path", pcsPath, "err", rmErr)
 		}
 
 		s.Script = postCreationScript
@@ -271,7 +269,7 @@ SENTINEL:
 		for _, client := range s.sshClients {
 			err = client.Close()
 			if err != nil {
-				s.logger.Warn("failed to close client ssh connection", "err", err)
+				clog.Warn(ctx, "failed to close client ssh connection", "err", err)
 			}
 		}
 		s.sshClients = []*ssh.Client{}
@@ -293,7 +291,7 @@ func (s *Server) Matches(os string, script []byte, configFiles string, flavor *F
 // and records the given resources have now been used up on this server, if
 // there was enough space. Returns true if there was enough space and the
 // allocation occurred.
-func (s *Server) Allocate(cores float64, ramMB, diskGB int) bool {
+func (s *Server) Allocate(ctx context.Context, cores float64, ramMB, diskGB int) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.checkSpace(cores, ramMB, diskGB) == 0 {
@@ -310,7 +308,8 @@ func (s *Server) Allocate(cores float64, ramMB, diskGB int) bool {
 	s.usedRAM += ramMB
 	s.usedDisk += diskGB
 
-	s.logger.Debug("server allocate", "cores", cores, "RAM", ramMB, "disk", diskGB, "usedCores", s.usedCores, "usedZeroCores", s.usedZeroCores, "usedRAM", s.usedRAM, "usedDisk", s.usedDisk)
+	clog.Debug(ctx, "server allocate", "cores", cores, "RAM", ramMB, "disk", diskGB, "usedCores",
+		s.usedCores, "usedZeroCores", s.usedZeroCores, "usedRAM", s.usedRAM, "usedDisk", s.usedDisk)
 
 	// if the host has initiated its countdown to destruction, cancel that
 	if s.onDeathrow {
@@ -331,7 +330,7 @@ func (s *Server) Used() bool {
 }
 
 // Release records that the given resources have now been freed.
-func (s *Server) Release(cores float64, ramMB, diskGB int) {
+func (s *Server) Release(ctx context.Context, cores float64, ramMB, diskGB int) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if cores == 0 {
@@ -341,23 +340,24 @@ func (s *Server) Release(cores float64, ramMB, diskGB int) {
 	}
 	s.usedRAM -= ramMB
 	s.usedDisk -= diskGB
-	s.logger.Debug("server release", "cores", cores, "RAM", ramMB, "disk", diskGB, "usedCores", s.usedCores, "usedZeroCores", s.usedZeroCores, "usedRAM", s.usedRAM, "usedDisk", s.usedDisk)
+	clog.Debug(ctx, "server release", "cores", cores, "RAM", ramMB, "disk", diskGB, "usedCores", s.usedCores,
+		"usedZeroCores", s.usedZeroCores, "usedRAM", s.usedRAM, "usedDisk", s.usedDisk)
 
 	// if the server is now doing nothing, we'll initiate a countdown to
 	// destroying the host
 	if s.usedCores <= 0 && s.usedZeroCores <= 0 && s.usedRAM <= 0 && s.TTD.Seconds() > 0 {
-		s.logger.Debug("server idle")
+		clog.Debug(ctx, "server idle")
 		go func() {
-			defer internal.LogPanic(s.logger, "server release", false)
+			defer internal.LogPanic(ctx, "server release", false)
 
 			s.mutex.Lock()
 			if s.onDeathrow {
 				s.mutex.Unlock()
-				s.logger.Debug("server already on deathrow")
+				clog.Debug(ctx, "server already on deathrow")
 				return
 			} else if s.usedCores > 0 || s.usedRAM > 0 {
 				s.mutex.Unlock()
-				s.logger.Debug("allocated before entering deathrow")
+				clog.Debug(ctx, "allocated before entering deathrow")
 				return
 			}
 			s.cancelDestruction = make(chan bool)
@@ -365,7 +365,7 @@ func (s *Server) Release(cores float64, ramMB, diskGB int) {
 			s.mutex.Unlock()
 
 			timeToDie := time.After(s.TTD)
-			s.logger.Debug("server entering deathrow", "death", time.Now().Add(s.TTD))
+			clog.Debug(ctx, "server entering deathrow", "death", time.Now().Add(s.TTD))
 			for {
 				select {
 				case <-s.cancelDestruction:
@@ -387,7 +387,7 @@ func (s *Server) Release(cores float64, ramMB, diskGB int) {
 					s.onDeathrow = false
 
 					s.mutex.Unlock()
-					s.logger.Debug("server cancelled deathrow")
+					clog.Debug(ctx, "server cancelled deathrow")
 					return
 				case <-timeToDie:
 					// destroy the server
@@ -395,8 +395,8 @@ func (s *Server) Release(cores float64, ramMB, diskGB int) {
 					s.onDeathrow = false
 					s.toBeDestroyed = true
 					s.mutex.Unlock()
-					err := s.Destroy()
-					s.logger.Debug("server died on deathrow", "err", err)
+					err := s.Destroy(ctx)
+					clog.Debug(ctx, "server died on deathrow", "err", err)
 					return
 				}
 			}
@@ -458,10 +458,10 @@ func (s *Server) checkSpace(cores float64, ramMB, diskGB int) int {
 }
 
 // createSSHClientConfig creates an ssh client config and stores it on self.
-func (s *Server) createSSHClientConfig() error {
+func (s *Server) createSSHClientConfig(ctx context.Context) error {
 	if s.PrivateKey == "" {
 		if s.provider != nil && s.provider.PrivateKey() == "" {
-			s.logger.Error("resource file did not contain the ssh key", "path", s.provider.savePath)
+			clog.Error(ctx, "resource file did not contain the ssh key", "path", s.provider.savePath)
 		}
 
 		return errors.New("missing ssh key")
@@ -474,7 +474,8 @@ func (s *Server) createSSHClientConfig() error {
 		if s.provider != nil {
 			path = s.provider.savePath
 		}
-		s.logger.Error("failed to parse private key", "path", path, "err", err)
+		clog.Error(ctx, "failed to parse private key", "path", path, "err", err)
+
 		return err
 	}
 	s.sshClientConfig = &ssh.ClientConfig{
@@ -516,7 +517,7 @@ func (s *Server) SSHClient(ctx context.Context) (*ssh.Client, int, error) {
 
 	// create a new client, add it to the pool
 	if s.sshClientConfig == nil {
-		err := s.createSSHClientConfig()
+		err := s.createSSHClientConfig(ctx)
 		if err != nil {
 			return nil, index, err
 		}
@@ -526,7 +527,7 @@ func (s *Server) SSHClient(ctx context.Context) (*ssh.Client, int, error) {
 	// network or server isn't really ready for ssh yet; wait for up to
 	// 5mins for success, if we had only just created this server
 	hostAndPort := s.IP + ":22"
-	client, err := sshDial(ctx, hostAndPort, s.sshClientConfig, s.logger)
+	client, err := sshDial(ctx, hostAndPort, s.sshClientConfig)
 	if err != nil {
 		// if we're trying to destroy this server, just give up straight away
 		if s.destroyed {
@@ -541,7 +542,7 @@ func (s *Server) SSHClient(ctx context.Context) (*ssh.Client, int, error) {
 		for {
 			select {
 			case <-ticker.C:
-				client, err = sshDial(ctx, hostAndPort, s.sshClientConfig, s.logger)
+				client, err = sshDial(ctx, hostAndPort, s.sshClientConfig)
 
 				// if it's a known "ssh still starting up" error, wait until the
 				// timeout, unless ssh had worked previously, in which case
@@ -594,11 +595,11 @@ func (s *Server) SSHClient(ctx context.Context) (*ssh.Client, int, error) {
 
 // sshDial calls ssh.Dial() and enforces the config's timeout, which ssh.Dial()
 // doesn't always seem to obey.
-func sshDial(ctx context.Context, addr string, sshConfig *ssh.ClientConfig, logger log15.Logger) (*ssh.Client, error) {
+func sshDial(ctx context.Context, addr string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
 	clientCh := make(chan *ssh.Client, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		defer internal.LogPanic(logger, "sshDial", false)
+		defer internal.LogPanic(ctx, "sshDial", false)
 		sshClient, err := ssh.Dial("tcp", addr, sshConfig)
 		clientCh <- sshClient
 		errCh <- err
@@ -622,7 +623,7 @@ func sshDial(ctx context.Context, addr string, sshConfig *ssh.ClientConfig, logg
 func (s *Server) SSHSession(ctx context.Context) (*ssh.Session, int, error) {
 	sshClient, clientIndex, err := s.SSHClient(ctx)
 	if err != nil {
-		s.logger.Debug("server ssh could not be established", "err", err)
+		clog.Debug(ctx, "server ssh could not be established", "err", err)
 		return nil, clientIndex, fmt.Errorf("cloud SSHSession() failed to get a client: %s", err.Error())
 	}
 
@@ -636,20 +637,20 @@ func (s *Server) SSHSession(ctx context.Context) (*ssh.Session, int, error) {
 	go func() {
 		select {
 		case <-time.After(sshShortTimeOut):
-			s.logger.Debug("server ssh timed out", "clientindex", clientIndex)
+			clog.Debug(ctx, "server ssh timed out", "clientindex", clientIndex)
 			done <- fmt.Errorf("cloud SSHSession() timed out")
 		case <-ctx.Done():
-			s.logger.Debug("server ssh cancelled", "clientindex", clientIndex)
+			clog.Debug(ctx, "server ssh cancelled", "clientindex", clientIndex)
 			done <- fmt.Errorf("cloud SSHSession() cancelled")
 		case <-worked:
 			return
 		}
 	}()
 	go func() {
-		defer internal.LogPanic(s.logger, "server sshsession", false)
+		defer internal.LogPanic(ctx, "server sshsession", false)
 		session, errf := sshClient.NewSession()
 		if errf != nil {
-			s.logger.Debug("server ssh failed", "err", errf, "clientindex", clientIndex)
+			clog.Debug(ctx, "server ssh failed", "err", errf, "clientindex", clientIndex)
 			done <- fmt.Errorf("cloud SSHSession() failed to esatablish a session: %s", errf.Error())
 			return
 		}
@@ -676,9 +677,9 @@ func (s *Server) SSHSession(ctx context.Context) (*ssh.Session, int, error) {
 // client used to create the session (as indicated by the supplied index, also
 // retrieved from SSHSession()) was marked as bad, it will now be marked as
 // good, on the assumption there is now "space" for a new session.
-func (s *Server) CloseSSHSession(session *ssh.Session, clientIndex int) {
+func (s *Server) CloseSSHSession(ctx context.Context, session *ssh.Session, clientIndex int) {
 	err := session.Close()
-	s.closeWarning(err)
+	s.closeWarning(ctx, err)
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -687,9 +688,9 @@ func (s *Server) CloseSSHSession(session *ssh.Session, clientIndex int) {
 
 // closeWarning warns about the given error if not nil, unless it is expected
 // in a close situation.
-func (s *Server) closeWarning(err error) {
+func (s *Server) closeWarning(ctx context.Context, err error) {
 	if err != nil && err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed network connection") {
-		s.logger.Warn("failed to close ssh session", "err", err)
+		clog.Warn(ctx, "failed to close ssh session", "err", err)
 	}
 }
 
@@ -736,7 +737,8 @@ func (s *Server) RunCmd(ctx context.Context, cmd string, background bool) (stdou
 	if err != nil {
 		return stdout, stderr, err
 	}
-	defer s.CloseSSHSession(session, clientIndex)
+
+	defer s.CloseSSHSession(ctx, session, clientIndex)
 
 	// if the sever is destroyed while running, arrange to immediately return an
 	// error
@@ -750,7 +752,7 @@ func (s *Server) RunCmd(ctx context.Context, cmd string, background bool) (stdou
 	errCh := make(chan string, 1)
 	finished := make(chan bool, 1)
 	go func() {
-		defer internal.LogPanic(s.logger, "server runcmd cancellation", false)
+		defer internal.LogPanic(ctx, "server runcmd cancellation", false)
 		select {
 		case <-cancelCh:
 			outCh <- ""
@@ -769,7 +771,7 @@ func (s *Server) RunCmd(ctx context.Context, cmd string, background bool) (stdou
 		s.mutex.Unlock()
 	}()
 	go func() {
-		defer internal.LogPanic(s.logger, "server runcmd", false)
+		defer internal.LogPanic(ctx, "server runcmd", false)
 
 		// run the command, returning stdout
 		if background {
@@ -816,7 +818,8 @@ func (s *Server) UploadFile(ctx context.Context, source string, dest string) err
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, client, "upload file client session", "source", source, "dest", dest)
+
+	defer internal.LogClose(ctx, client, "upload file client session", "source", source, "dest", dest)
 
 	// create all parent dirs of dest
 	err = s.MkDir(ctx, filepath.Dir(dest))
@@ -829,7 +832,8 @@ func (s *Server) UploadFile(ctx context.Context, source string, dest string) err
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, sourceFile, "upload file source", "source", source, "dest", dest)
+
+	defer internal.LogClose(ctx, sourceFile, "upload file source", "source", source, "dest", dest)
 
 	destFile, err := client.Create(dest)
 	if err != nil {
@@ -936,7 +940,8 @@ func (s *Server) CreateFile(ctx context.Context, content string, dest string) er
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, client, "create file client session")
+
+	defer internal.LogClose(ctx, client, "create file client session")
 
 	// create all parent dirs of dest
 	err = s.MkDir(ctx, filepath.Dir(dest))
@@ -967,14 +972,16 @@ func (s *Server) DownloadFile(ctx context.Context, source string, dest string) e
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, client, "download file client session", "source", source, "dest", dest)
+
+	defer internal.LogClose(ctx, client, "download file client session", "source", source, "dest", dest)
 
 	// open source, create dest
 	sourceFile, err := client.Open(source)
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, sourceFile, "download file source", "source", source, "dest", dest)
+
+	defer internal.LogClose(ctx, sourceFile, "download file source", "source", source, "dest", dest)
 
 	destFile, err := os.Create(dest)
 	if err != nil {
@@ -1055,7 +1062,9 @@ func (s *Server) CreateSharedDisk() error {
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(s.logger, f, "/etc/exports")
+
+	defer internal.LogClose(ctx, f, "/etc/exports")
+
 	scanner := bufio.NewScanner(f)
 	var found bool
 	for scanner.Scan() {
@@ -1119,17 +1128,20 @@ func (s *Server) MountSharedDisk(ctx context.Context, nfsServerIP string) error 
 	if err != nil {
 		return err
 	}
-	s.logger.Debug("ran MkDir")
+
+	clog.Debug(ctx, "ran MkDir")
 
 	stdo, stde, err := s.RunCmd(ctx, fmt.Sprintf("sudo mount %s:%s %s", nfsServerIP, sharePath, sharePath), false)
 	if err != nil {
-		s.logger.Error("mount attempt failed", "stdout", stdo, "stderr", stde)
+		clog.Error(ctx, "mount attempt failed", "stdout", stdo, "stderr", stde)
 		return err
 	}
 
 	s.createdShare = true
 	s.SharedDisk = true
-	s.logger.Debug("mounted shared disk")
+
+	clog.Debug(ctx, "mounted shared disk")
+
 	return nil
 }
 
@@ -1194,7 +1206,7 @@ func (s *Server) PermanentProblem() string {
 }
 
 // Destroy immediately destroys the server.
-func (s *Server) Destroy() error {
+func (s *Server) Destroy(ctx context.Context) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.destroyed {
@@ -1220,17 +1232,17 @@ func (s *Server) Destroy() error {
 		t := time.Now()
 		session, clientIndex, err := s.SSHSession(context.Background())
 		if err != nil {
-			s.logger.Warn("failed to ssh to cleanly shutdown", "took", time.Since(t), "err", err)
+			clog.Warn(ctx, "failed to ssh to cleanly shutdown", "took", time.Since(t), "err", err)
 		} else {
 			t = time.Now()
 			stdo, stde, err := s.RunCmd(context.Background(), cleanShutDownCmd, false)
 			rt := time.Since(t)
 			if err != nil {
-				s.logger.Warn("clean shutdown failed", "took", rt, "err", err, "stdout", stdo, "stderr", stde)
+				clog.Warn(ctx, "clean shutdown failed", "took", rt, "err", err, "stdout", stdo, "stderr", stde)
 			} else if rt > 10*time.Second {
-				s.logger.Warn("clean shutdown took a long time", "took", rt, "stdout", stdo)
+				clog.Warn(ctx, "clean shutdown took a long time", "took", rt, "stdout", stdo)
 			}
-			s.CloseSSHSession(session, clientIndex)
+			s.CloseSSHSession(ctx, session, clientIndex)
 		}
 		s.mutex.Lock()
 	}
@@ -1238,7 +1250,7 @@ func (s *Server) Destroy() error {
 	// explicitly close any client connections
 	for _, client := range s.sshClients {
 		err := client.Close()
-		s.closeWarning(err)
+		s.closeWarning(ctx, err)
 	}
 
 	if s.goneBad.IsZero() {
@@ -1250,11 +1262,11 @@ func (s *Server) Destroy() error {
 		return fmt.Errorf("provider not set")
 	}
 
-	err := s.provider.DestroyServer(s.ID)
-	s.logger.Debug("server destroyed", "err", err)
+	err := s.provider.DestroyServer(ctx, s.ID)
+	clog.Debug(ctx, "server destroyed", "err", err)
 	if err != nil {
 		// check if the server exists
-		ok, errc := s.provider.CheckServer(s.ID)
+		ok, errc := s.provider.CheckServer(ctx, s.ID)
 		if ok && errc == nil {
 			return err
 		}
@@ -1279,13 +1291,14 @@ func (s *Server) Destroyed() bool {
 // Destroyed() before calling out to the provider. Supplying an optional boolean
 // will double check the server to make sure it can be ssh'd to. If the server
 // doesn't exist, it will be removed from the provider's resources file.
-func (s *Server) Alive(checkSSH ...bool) bool {
+func (s *Server) Alive(ctx context.Context, checkSSH ...bool) bool {
 	s.mutex.Lock()
 	if s.destroyed || s.toBeDestroyed {
 		s.mutex.Unlock()
 		return false
 	}
-	ok, errc := s.provider.CheckServer(s.ID)
+
+	ok, errc := s.provider.CheckServer(ctx, s.ID)
 	if !ok || errc != nil {
 		s.mutex.Unlock()
 		return false
@@ -1299,7 +1312,8 @@ func (s *Server) Alive(checkSSH ...bool) bool {
 		if err != nil {
 			return false
 		}
-		s.CloseSSHSession(session, clientIndex)
+
+		s.CloseSSHSession(ctx, session, clientIndex)
 	}
 
 	return true
@@ -1311,10 +1325,10 @@ func (s *Server) Alive(checkSSH ...bool) bool {
 // server isn't known about, the provider's resource file is NOT updated,
 // because this indicates you're using the wrong resource file for these
 // credentials.
-func (s *Server) Known() bool {
+func (s *Server) Known(ctx context.Context) bool {
 	known, err := s.provider.ServerIsKnown(s.ID)
 	if err != nil {
-		s.logger.Warn("could not check if the server is known about", "err", err)
+		clog.Warn(ctx, "could not check if the server is known about", "err", err)
 	}
 
 	return known

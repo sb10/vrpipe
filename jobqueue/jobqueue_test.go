@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -38,13 +38,12 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	muxfys "github.com/VertebrateResequencing/muxfys/v4"
 	"github.com/VertebrateResequencing/wr/cloud"
 	"github.com/VertebrateResequencing/wr/internal"
 	jqs "github.com/VertebrateResequencing/wr/jobqueue/scheduler"
-	"github.com/inconshreveable/log15"
-	"github.com/sb10/l15h"
 	"github.com/shirou/gopsutil/process"
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -67,11 +66,8 @@ var servermode bool
 var serverKeepDB bool
 var serverEnableRunners bool
 
-var testLogger = log15.New()
-
 func init() {
-	h := l15h.CallerInfoHandler(log15.StderrHandler)
-	testLogger.SetHandler(log15.LvlFilterHandler(log15.LvlWarn, h))
+	clog.ToDefault()
 
 	sync.Opts.DeadlockTimeout = 5 * time.Minute // some openstack behaviour needs a pretty long timeout
 
@@ -213,16 +209,17 @@ func TestJobqueueUtils(t *testing.T) {
 }
 
 func jobqueueTestInit(shortTTR bool) (internal.Config, ServerConfig, string, *jqs.Requirements, time.Duration) {
+	ctx := context.Background()
 	// load our config to know where our development manager port is supposed to
 	// be; we'll use that to test jobqueue
-	config := internal.ConfigLoad("development", true, testLogger)
-	managerDBBkFile := config.ManagerDbFile + "_bk" // not config.ManagerDbBkFile in case it is an s3 url
+	config := internal.ConfigLoadFromParentDir(ctx, "development")
+	managerDBBkFile := config.ManagerDBFile + "_bk" // not config.ManagerDBBkFile in case it is an s3 url
 	serverConfig := ServerConfig{
 		Port:            config.ManagerPort,
 		WebPort:         config.ManagerWeb,
 		SchedulerName:   "local",
 		SchedulerConfig: &jqs.ConfigLocal{Shell: config.RunnerExecShell},
-		DBFile:          config.ManagerDbFile,
+		DBFile:          config.ManagerDBFile,
 		DBFileBackup:    managerDBBkFile,
 		TokenFile:       config.ManagerTokenFile,
 		CAFile:          config.ManagerCAFile,
@@ -230,7 +227,6 @@ func jobqueueTestInit(shortTTR bool) (internal.Config, ServerConfig, string, *jq
 		CertDomain:      config.ManagerCertDomain,
 		KeyFile:         config.ManagerKeyFile,
 		Deployment:      config.Deployment,
-		Logger:          testLogger,
 	}
 	addr := "localhost:" + config.ManagerPort
 
@@ -248,7 +244,7 @@ func jobqueueTestInit(shortTTR bool) (internal.Config, ServerConfig, string, *jq
 
 	standardReqs := &jqs.Requirements{RAM: 10, Time: 10 * time.Second, Cores: 1, Disk: 0, Other: make(map[string]string)}
 
-	return config, serverConfig, addr, standardReqs, clientConnectTime
+	return *config, serverConfig, addr, standardReqs, clientConnectTime
 }
 
 // startServer runs the given exe with the --servermode arg. It is assumed that
@@ -294,7 +290,7 @@ func startServer(serverExe string, keepDB, enableRunners bool, config internal.C
 
 // runServer starts a jobqueue server, and is what calling this test script in
 // --servermode runs.
-func runServer() {
+func runServer(ctx context.Context) {
 	// uncomment and set a log path to debug server issues in TestJobqueueSignal
 	// fh, err := log15.FileHandler("/log", log15.LogfmtFormat())
 	// if err != nil {
@@ -314,7 +310,7 @@ func runServer() {
 	if serverEnableRunners {
 		self, err := os.Executable()
 		if err != nil {
-			testLogger.Crit("os.Executable() failed", "err", err)
+			clog.Crit(ctx, "os.Executable() failed", "err", err)
 			os.Exit(1)
 		}
 
@@ -325,36 +321,35 @@ func runServer() {
 	}
 
 	ServerItemTTR = 200 * time.Millisecond
-	server, msg, _, err := serve(serverConfig)
+	server, msg, _, err := serve(ctx, serverConfig)
 	if err != nil {
-		testLogger.Crit("test daemon failed to start", "err", err)
+		clog.Crit(ctx, "test daemon failed to start", "err", err)
 		os.Exit(1)
 	}
 	if msg != "" {
-		testLogger.Warn(msg)
+		clog.Warn(ctx, msg)
 	}
 
 	// we'll Block() later, but just in case the parent tests bomb out
 	// without killing us, we'll stop after 20s
 	go func() {
 		<-time.After(20 * time.Second)
-		testLogger.Warn("test daemon stopping after 20s")
-		server.Stop(true)
+		clog.Warn(ctx, "test daemon stopping after 20s")
+		server.Stop(ctx, true)
 	}()
 
-	testLogger.Warn("test daemon up, will block")
+	clog.Warn(ctx, "test daemon up, will block")
 
 	// wait until we are killed
 	err = server.Block()
-	testLogger.Warn("test daemon exiting", "reason", err)
-	os.Exit(0)
+	clog.Fatal(ctx, "test daemon exiting", "reason", err)
 }
 
 // serve calls Serve() but with a retry for 5s on failure. This allows time for
 // a server that we recently stopped in a prior test to really not be listening
 // on the ports any more.
-func serve(config ServerConfig) (*Server, string, []byte, error) {
-	server, msg, token, err := Serve(config)
+func serve(ctx context.Context, config ServerConfig) (*Server, string, []byte, error) {
+	server, msg, token, err := Serve(ctx, config)
 	if err != nil {
 		limit := time.After(5 * time.Second)
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -362,7 +357,7 @@ func serve(config ServerConfig) (*Server, string, []byte, error) {
 		for {
 			select {
 			case <-ticker.C:
-				server, msg, token, err = Serve(config)
+				server, msg, token, err = Serve(ctx, config)
 				if err != nil {
 					continue
 				}
@@ -407,7 +402,7 @@ func TestJobqueueSignal(t *testing.T) {
 		return
 	}
 	if servermode {
-		runServer()
+		runServer(ctx)
 		return
 	}
 
@@ -886,20 +881,20 @@ func TestJobqueueBasics(t *testing.T) {
 		So(ok, ShouldBeTrue)
 		So(jqerr.Err, ShouldEqual, ErrNoServer)
 
-		jq, err := ConnectUsingConfig("development", clientConnectTime, testLogger)
+		jq, err := ConnectUsingConfig(ctx, "development", clientConnectTime)
 		So(jq, ShouldBeNil)
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "could not read token file")
 	})
 
 	Convey("Once the jobqueue server is up", t, func() {
-		server, _, token, errs = serve(serverConfig)
+		server, _, token, errs = serve(ctx, serverConfig)
 		So(errs, ShouldBeNil)
 
 		server.rc = serverRC // ReserveScheduled() only works if we have an rc
 
 		Convey("You can connect to the server using config", func() {
-			jq, err := ConnectUsingConfig("development", clientConnectTime, testLogger)
+			jq, err := ConnectUsingConfig(ctx, "development", clientConnectTime)
 			So(err, ShouldBeNil)
 			defer disconnect(jq)
 		})
@@ -991,7 +986,7 @@ func TestJobqueueBasics(t *testing.T) {
 					job.PeakDisk = int64(index + 2)
 					job.StartTime = time.Now()
 					job.EndTime = job.StartTime.Add(time.Duration(index+1) * time.Second)
-					server.db.updateJobAfterExit(job, []byte{}, []byte{}, false)
+					server.db.updateJobAfterExit(ctx, job, []byte{}, []byte{}, false)
 				}
 				<-time.After(200 * time.Millisecond)
 				rmem, err := server.db.recommendedReqGroupMemory("fake_group")
@@ -1019,7 +1014,7 @@ func TestJobqueueBasics(t *testing.T) {
 						job.FailReason = FailReasonTime
 					}
 
-					server.db.updateJobAfterExit(job, []byte{}, []byte{}, false)
+					server.db.updateJobAfterExit(ctx, job, []byte{}, []byte{}, false)
 				}
 				<-time.After(200 * time.Millisecond)
 				rmem, err = server.db.recommendedReqGroupMemory("fake_group")
@@ -1048,7 +1043,7 @@ func TestJobqueueBasics(t *testing.T) {
 						job.FailReason = FailReasonTime
 					}
 
-					server.db.updateJobAfterExit(job, []byte{}, []byte{}, false)
+					server.db.updateJobAfterExit(ctx, job, []byte{}, []byte{}, false)
 				}
 				<-time.After(500 * time.Millisecond)
 				rmem, err = server.db.recommendedReqGroupMemory("fake_group")
@@ -1293,7 +1288,7 @@ func TestJobqueueBasics(t *testing.T) {
 				So(ok, ShouldBeTrue)
 				So(jqerr.Err, ShouldEqual, ErrNoServer)
 
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -1324,12 +1319,12 @@ func TestJobqueueBasics(t *testing.T) {
 		})
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 
 	if server != nil {
-		server.Stop(true)
+		server.Stop(ctx, true)
 	}
 }
 
@@ -1348,10 +1343,10 @@ func TestJobqueueMedium(t *testing.T) {
 	Convey("Once a new jobqueue server is up", t, func() {
 		ServerItemTTR = 200 * time.Millisecond
 		ClientTouchInterval = 50 * time.Millisecond
-		server, _, token, errs := serve(serverConfig)
+		server, _, token, errs := serve(ctx, serverConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		Convey("You can connect, and add some real jobs", func() {
@@ -2969,7 +2964,7 @@ func TestJobqueueMedium(t *testing.T) {
 		})
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 }
@@ -2987,10 +2982,10 @@ func TestJobqueueLimitGroups(t *testing.T) {
 	Convey("Once a new jobqueue server is up", t, func() {
 		ServerItemTTR = 1 * time.Second
 		ClientTouchInterval = 2500 * time.Millisecond
-		server, _, token, errs := serve(serverConfig)
+		server, _, token, errs := serve(ctx, serverConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		server.rc = serverRC
@@ -3138,7 +3133,7 @@ func TestJobqueueLimitGroups(t *testing.T) {
 		})
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 }
@@ -3171,10 +3166,10 @@ func TestJobqueueModify(t *testing.T) {
 		ServerItemTTR = 5 * time.Second
 		ClientTouchInterval = 2500 * time.Millisecond
 		ClientReleaseDelay = 0 * time.Second
-		server, _, token, errs := serve(serverConfig)
+		server, _, token, errs := serve(ctx, serverConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		server.rc = serverRC
@@ -3717,7 +3712,7 @@ func TestJobqueueModify(t *testing.T) {
 		// restart
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 }
@@ -3738,10 +3733,10 @@ func TestJobqueueHighMem(t *testing.T) {
 		Convey("If a job uses close to all memory on machine it is killed and we recommend more next time", t, func() {
 			ServerItemTTR = 200 * time.Second
 			ClientTouchInterval = 50 * time.Millisecond
-			server, _, token, errs := serve(serverConfig)
+			server, _, token, errs := serve(ctx, serverConfig)
 			So(errs, ShouldBeNil)
 			defer func() {
-				server.Stop(true)
+				server.Stop(ctx, true)
 			}()
 
 			jq, err := Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -3823,13 +3818,13 @@ func TestJobqueueProduction(t *testing.T) {
 		defer func() {
 			forceBackups = false
 		}()
-		server, _, token, errs := serve(serverConfig)
+		server, _, token, errs := serve(ctx, serverConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
-		_, err := os.Stat(config.ManagerDbFile)
+		_, err := os.Stat(config.ManagerDBFile)
 		So(err, ShouldBeNil)
 		_, err = os.Stat(managerDBBkFile)
 		So(err, ShouldNotBeNil)
@@ -3868,7 +3863,7 @@ func TestJobqueueProduction(t *testing.T) {
 
 			<-wait
 
-			info, err := os.Stat(config.ManagerDbFile)
+			info, err := os.Stat(config.ManagerDBFile)
 			So(err, ShouldBeNil)
 			So(info.Size(), ShouldEqual, 65536) // don't know if this will be consistent across platforms and versions...
 			info2, err := os.Stat(managerDBBkFile)
@@ -3885,8 +3880,8 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(info3.Size(), ShouldEqual, 32768)
 
-				server.Stop(true)
-				server, _, token, errs = serve(serverConfig)
+				server.Stop(ctx, true)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -3895,15 +3890,15 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 0)
 
-				server.Stop(true)
-				err = os.Rename(manualBackup, config.ManagerDbFile)
+				server.Stop(ctx, true)
+				err = os.Rename(manualBackup, config.ManagerDBFile)
 				So(err, ShouldBeNil)
 				wipeDevDBOnInit = false
 
 				defer func() {
 					wipeDevDBOnInit = true
 				}()
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -3918,12 +3913,12 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 2)
 
-				server.Stop(true)
+				server.Stop(ctx, true)
 				wipeDevDBOnInit = false
 				defer func() {
 					wipeDevDBOnInit = true
 				}()
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -3932,17 +3927,17 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 2)
 
-				server.Stop(true)
-				os.Remove(config.ManagerDbFile)
-				_, err = os.Stat(config.ManagerDbFile)
+				server.Stop(ctx, true)
+				os.Remove(config.ManagerDBFile)
+				_, err = os.Stat(config.ManagerDBFile)
 				So(err, ShouldNotBeNil)
 				_, err = os.Stat(managerDBBkFile)
 				So(err, ShouldBeNil)
 
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 
-				info, err = os.Stat(config.ManagerDbFile)
+				info, err = os.Stat(config.ManagerDBFile)
 				So(err, ShouldBeNil)
 				So(info.Size(), ShouldEqual, 32768)
 				info2, err = os.Stat(managerDBBkFile)
@@ -3956,8 +3951,8 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 2)
 
-				server.Stop(true)
-				f, err := os.OpenFile(config.ManagerDbFile, os.O_TRUNC|os.O_RDWR, dbFilePermission)
+				server.Stop(ctx, true)
+				f, err := os.OpenFile(config.ManagerDBFile, os.O_TRUNC|os.O_RDWR, dbFilePermission)
 				So(err, ShouldBeNil)
 				_, err = f.WriteString("corrupt!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 				So(err, ShouldBeNil)
@@ -3966,10 +3961,10 @@ func TestJobqueueProduction(t *testing.T) {
 				err = f.Close()
 				So(err, ShouldBeNil)
 
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 
-				info, err = os.Stat(config.ManagerDbFile)
+				info, err = os.Stat(config.ManagerDBFile)
 				So(err, ShouldBeNil)
 				So(info.Size(), ShouldEqual, 32768)
 				info2, err = os.Stat(managerDBBkFile)
@@ -3994,9 +3989,9 @@ func TestJobqueueProduction(t *testing.T) {
 				So(job.Exited, ShouldBeTrue)
 				So(job.Exitcode, ShouldEqual, 0)
 
-				server.Stop(true)
+				server.Stop(ctx, true)
 				wipeDevDBOnInit = false
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				wipeDevDBOnInit = true
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -4026,9 +4021,9 @@ func TestJobqueueProduction(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(inserts, ShouldEqual, 1)
 			So(already, ShouldEqual, 0)
-			server.Stop(true)
+			server.Stop(ctx, true)
 
-			info, err := os.Stat(config.ManagerDbFile)
+			info, err := os.Stat(config.ManagerDBFile)
 			So(err, ShouldBeNil)
 			So(info.Size(), ShouldEqual, 32768)
 			info2, err := os.Stat(managerDBBkFile)
@@ -4040,9 +4035,9 @@ func TestJobqueueProduction(t *testing.T) {
 				defer func() {
 					wipeDevDBOnInit = true
 				}()
-				errr := os.Remove(config.ManagerDbFile)
+				errr := os.Remove(config.ManagerDBFile)
 				So(errr, ShouldBeNil)
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -4052,13 +4047,13 @@ func TestJobqueueProduction(t *testing.T) {
 				errb := jq.Bury(job, nil, "")
 				So(errb, ShouldBeNil)
 				deleted, err := jq.Delete([]*JobEssence{{JobKey: job.Key()}})
-				server.Stop(true)
+				server.Stop(ctx, true)
 				So(deleted, ShouldEqual, 1)
 				So(err, ShouldBeNil)
 
-				errr = os.Remove(config.ManagerDbFile)
+				errr = os.Remove(config.ManagerDBFile)
 				So(errr, ShouldBeNil)
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -4109,7 +4104,7 @@ func TestJobqueueProduction(t *testing.T) {
 				So(err, ShouldNotBeNil)
 
 				wipeDevDBOnInit = false
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				wipeDevDBOnInit = true
 				So(errs, ShouldBeNil)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -4163,7 +4158,7 @@ func TestJobqueueProduction(t *testing.T) {
 				}
 
 				wipeDevDBOnInit = false
-				server, _, token, errs = serve(serverConfig)
+				server, _, token, errs = serve(ctx, serverConfig)
 				startedAt := time.Now()
 				wipeDevDBOnInit = true
 				So(errs, ShouldBeNil)
@@ -4243,7 +4238,7 @@ func TestJobqueueProduction(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			wipeDevDBOnInit = false
-			server, _, token, errs = serve(serverConfig)
+			server, _, token, errs = serve(ctx, serverConfig)
 			wipeDevDBOnInit = true
 			So(errs, ShouldBeNil)
 			jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -4257,7 +4252,7 @@ func TestJobqueueProduction(t *testing.T) {
 		})
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 }
@@ -4306,10 +4301,10 @@ func TestJobqueueRunners(t *testing.T) {
 
 		runningConfig := serverConfig
 		runningConfig.RunnerCmd = runnerCmd + " --runnermode --schedgrp '%s' --rdeployment %s --rserver '%s' --rdomain %s --rtimeout %d --maxmins %d --tmpdir " + runnertmpdir
-		server, _, token, errs := serve(runningConfig)
+		server, _, token, errs := serve(ctx, runningConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		maxCPU := runtime.NumCPU()
@@ -4498,7 +4493,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done <- true
 								return
@@ -4681,7 +4676,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done <- true
 								return
@@ -4757,7 +4752,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done <- true
 								return
@@ -4839,7 +4834,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done <- true
 								return
@@ -4939,7 +4934,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done2 <- true
 								return
@@ -5052,7 +5047,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								done <- true
 								return
@@ -5111,7 +5106,7 @@ func TestJobqueueRunners(t *testing.T) {
 									}
 								}
 							}
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								running <- false
 								return
@@ -5164,7 +5159,7 @@ func TestJobqueueRunners(t *testing.T) {
 									maxSimultaneous = simultaneous
 								}
 							}
-							if !server.HasRunners() {
+							if !server.HasRunners(ctx) {
 								ticker.Stop()
 								numRanSimultaneously <- maxSimultaneous
 								return
@@ -5272,7 +5267,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if twoHundredCount > 0 && !server.HasRunners() {
+							if twoHundredCount > 0 && !server.HasRunners(ctx) {
 								// check they're really all complete, since the
 								// switch to a new job array could leave us with no
 								// runners temporarily
@@ -5344,8 +5339,8 @@ func TestJobqueueRunners(t *testing.T) {
 				lsfConfig := runningConfig
 				lsfConfig.SchedulerName = "lsf"
 				lsfConfig.SchedulerConfig = &jqs.ConfigLSF{Shell: config.RunnerExecShell, Deployment: "testing", PrivateKeyPath: privateKeyPath}
-				server.Stop(true)
-				server, _, token, errs = serve(lsfConfig)
+				server.Stop(ctx, true)
+				server, _, token, errs = serve(ctx, lsfConfig)
 				So(errs, ShouldBeNil)
 
 				batchtest()
@@ -5354,7 +5349,7 @@ func TestJobqueueRunners(t *testing.T) {
 
 		Reset(func() {
 			if server != nil {
-				server.Stop(true)
+				server.Stop(ctx, true)
 			}
 		})
 	})
@@ -5386,10 +5381,10 @@ func TestJobqueueRunners(t *testing.T) {
 
 		runningConfig := serverConfig
 		runningConfig.RunnerCmd = runnerCmd + " --runnermode --runnerfail --schedgrp '%s' --rdeployment %s --rserver '%s' --rdomain %s --rtimeout %d --maxmins %d --tmpdir " + runnertmpdir
-		server, _, token, errs := serve(runningConfig)
+		server, _, token, errs := serve(ctx, runningConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		Convey("You can connect, and add a job", func() {
@@ -5435,7 +5430,7 @@ func TestJobqueueRunners(t *testing.T) {
 					for {
 						select {
 						case <-ticker.C:
-							if server.HasRunners() {
+							if server.HasRunners(ctx) {
 								ticker.Stop()
 								hadRunner <- true
 								return
@@ -5461,16 +5456,16 @@ func TestJobqueueRunners(t *testing.T) {
 
 				So(runnerCheck(), ShouldEqual, 2)
 
-				err = server.Drain()
+				err = server.Drain(ctx)
 				So(err, ShouldBeNil)
 				<-time.After(4 * time.Second)
-				So(server.HasRunners(), ShouldBeFalse)
+				So(server.HasRunners(ctx), ShouldBeFalse)
 			})
 		})
 
 		Reset(func() {
 			if server != nil {
-				server.Stop(true)
+				server.Stop(ctx, true)
 			}
 		})
 	})
@@ -5480,6 +5475,8 @@ func TestJobqueueWithOpenStack(t *testing.T) {
 	if runnermode || servermode {
 		return
 	}
+
+	ctx := context.Background()
 
 	osPrefix := os.Getenv("OS_OS_PREFIX")
 	osUser := os.Getenv("OS_OS_USERNAME")
@@ -5501,7 +5498,7 @@ func TestJobqueueWithOpenStack(t *testing.T) {
 	var server *Server
 	var token []byte
 	var errs error
-	config := internal.ConfigLoad("development", true, testLogger)
+	config := internal.ConfigLoadFromParentDir(ctx, "development")
 	addr := "localhost:" + config.ManagerPort
 
 	setDomainIP(config.ManagerCertDomain)
@@ -5547,8 +5544,8 @@ func TestJobqueueWithOpenStack(t *testing.T) {
 		SchedulerName:   "openstack",
 		SchedulerConfig: cloudConfig,
 		UploadDir:       config.ManagerUploadDir,
-		DBFile:          config.ManagerDbFile,
-		DBFileBackup:    config.ManagerDbBkFile,
+		DBFile:          config.ManagerDBFile,
+		DBFileBackup:    config.ManagerDBBkFile,
 		TokenFile:       config.ManagerTokenFile,
 		CAFile:          config.ManagerCAFile,
 		CertFile:        config.ManagerCertFile,
@@ -5556,7 +5553,6 @@ func TestJobqueueWithOpenStack(t *testing.T) {
 		KeyFile:         config.ManagerKeyFile,
 		Deployment:      config.Deployment,
 		RunnerCmd:       runnerCmd + " --runnermode --schedgrp '%s' --rdeployment %s --rserver '%s' --rdomain %s --rtimeout %d --maxmins %d --tmpdir " + runnertmpdir,
-		Logger:          testLogger,
 	}
 
 	dockerInstallScript := `sudo mkdir -p /etc/docker/
@@ -5570,11 +5566,11 @@ sudo >&2 apt-get -y install docker-ce docker-ce-cli containerd.io && >&2 echo in
 sudo usermod -aG docker ` + osUser
 
 	Convey("You can connect with an OpenStack scheduler", t, func() {
-		server, _, token, errs = serve(osConfig)
+		server, _, token, errs = serve(ctx, osConfig)
 		So(errs, ShouldBeNil)
 		defer func() {
 			<-time.After(1 * time.Second) // give runners a chance to exit to avoid extraneous warnings
-			server.Stop(true)
+			server.Stop(ctx, true)
 		}()
 
 		jq, err := Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
@@ -5634,7 +5630,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if !server.HasRunners() {
+						if !server.HasRunners(ctx) {
 							ticker.Stop()
 							done <- true
 							return
@@ -5811,11 +5807,11 @@ sudo usermod -aG docker ` + osUser
 			other := make(map[string]string)
 
 			cores := runtime.NumCPU()
-			p, err := cloud.New("openstack", resourceName, filepath.Join(runnertmpdir, "os_resources"))
+			p, err := cloud.New(ctx, "openstack", resourceName, filepath.Join(runnertmpdir, "os_resources"))
 			So(err, ShouldBeNil)
-			flavor, err := p.CheapestServerFlavor(cores, 2048, flavorRegex)
+			flavor, err := p.CheapestServerFlavor(ctx, cores, 2048, flavorRegex)
 			So(err, ShouldBeNil)
-			flavor, err = p.CheapestServerFlavor(flavor.Cores+1, 2048, flavorRegex)
+			flavor, err = p.CheapestServerFlavor(ctx, flavor.Cores+1, 2048, flavorRegex)
 			So(err, ShouldBeNil)
 			coresMore := flavor.Cores
 
@@ -5972,7 +5968,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if !server.HasRunners() {
+						if !server.HasRunners(ctx) {
 							ticker.Stop()
 							done <- true
 							return
@@ -6028,7 +6024,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if !server.HasRunners() {
+						if !server.HasRunners(ctx) {
 							got, errg := jq.GetIncomplete(0, "", false, false)
 							if errg != nil {
 								fmt.Printf("GetIncomplete failed: %s\n", errg)
@@ -6205,7 +6201,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if !server.HasRunners() {
+						if !server.HasRunners(ctx) {
 							ticker.Stop()
 							done <- true
 							return
@@ -6256,7 +6252,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if !server.HasRunners() {
+						if !server.HasRunners(ctx) {
 							ticker.Stop()
 							done <- true
 							return
@@ -6273,7 +6269,7 @@ sudo usermod -aG docker ` + osUser
 		})
 
 		Convey("The manager reacts correctly to spawned servers going down", func() {
-			p, err := cloud.New("openstack", resourceName, filepath.Join(runnertmpdir, "os_resources"))
+			p, err := cloud.New(ctx, "openstack", resourceName, filepath.Join(runnertmpdir, "os_resources"))
 			So(err, ShouldBeNil)
 
 			// for this test to work, we need 1 job to run on another
@@ -6281,13 +6277,13 @@ sudo usermod -aG docker ` + osUser
 			// job
 			cores := runtime.NumCPU()
 
-			flavor, err := p.CheapestServerFlavor(cores, 2048, flavorRegex)
+			flavor, err := p.CheapestServerFlavor(ctx, cores, 2048, flavorRegex)
 			So(err, ShouldBeNil)
 
 			destroyedBadServer := 0
 			var dbsMutex sync.Mutex
 			badServerCB := func(server *cloud.Server) {
-				errf := server.Destroy()
+				errf := server.Destroy(ctx)
 				if errf == nil {
 					dbsMutex.Lock()
 					destroyedBadServer++
@@ -6295,7 +6291,7 @@ sudo usermod -aG docker ` + osUser
 				}
 			}
 
-			server.scheduler.SetBadServerCallBack(badServerCB)
+			server.scheduler.SetBadServerCallBack(ctx, badServerCB)
 
 			var jobs []*Job
 			req := &jqs.Requirements{RAM: 2048, Time: 1 * time.Hour, Cores: float64(cores), Disk: 0}
@@ -6315,7 +6311,7 @@ sudo usermod -aG docker ` + osUser
 				for {
 					select {
 					case <-ticker.C:
-						if server.HasRunners() {
+						if server.HasRunners(ctx) {
 							running, errf := jq.GetByRepGroup("sleep", false, 0, JobStateRunning, false, false)
 							if errf != nil {
 								ticker.Stop()
@@ -6383,7 +6379,7 @@ sudo usermod -aG docker ` + osUser
 				if job.Host != host {
 					So(job.HostID, ShouldNotBeBlank)
 					So(job.HostIP, ShouldNotBeBlank)
-					err = p.DestroyServer(job.HostID)
+					err = p.DestroyServer(ctx, job.HostID)
 					So(err, ShouldBeNil)
 					destroyed = true
 					killedJobEssence = &JobEssence{JobKey: job.Key()}
@@ -6409,7 +6405,7 @@ sudo usermod -aG docker ` + osUser
 						}
 						if job.State == JobStateLost {
 							ticker.Stop()
-							e, err := server.killJob(killedJobEssence.JobKey)
+							e, err := server.killJob(ctx, killedJobEssence.JobKey)
 							if !e || err != nil {
 								gotLost <- false
 							}
@@ -6440,7 +6436,7 @@ sudo usermod -aG docker ` + osUser
 		Reset(func() {
 			if server != nil {
 				<-time.After(1 * time.Second)
-				server.Stop(true)
+				server.Stop(ctx, true)
 			}
 		})
 	})
@@ -6483,39 +6479,38 @@ func TestJobqueueWithMounts(t *testing.T) {
 	ServerItemTTR = 10 * time.Second
 	ClientTouchInterval = 50 * time.Millisecond
 
-	config := internal.ConfigLoad("development", true, testLogger)
+	config := internal.ConfigLoadFromParentDir(ctx, "development")
 	addr := "localhost:" + config.ManagerPort
 	serverConfig := ServerConfig{
 		Port:            config.ManagerPort,
 		WebPort:         config.ManagerWeb,
 		SchedulerName:   "local",
 		SchedulerConfig: &jqs.ConfigLocal{Shell: config.RunnerExecShell},
-		DBFile:          config.ManagerDbFile,
-		DBFileBackup:    config.ManagerDbBkFile,
+		DBFile:          config.ManagerDBFile,
+		DBFileBackup:    config.ManagerDBBkFile,
 		TokenFile:       config.ManagerTokenFile,
 		CAFile:          config.ManagerCAFile,
 		CertFile:        config.ManagerCertFile,
 		CertDomain:      config.ManagerCertDomain,
 		KeyFile:         config.ManagerKeyFile,
 		Deployment:      config.Deployment,
-		Logger:          testLogger,
 	}
 
 	Convey("You can bring up a server configured with an S3 db backup", t, func() {
 		s3ServerConfig := serverConfig
 		s3ServerConfig.DBFileBackup = fmt.Sprintf("s3://default@%s/db.bk", s3Path)
-		localBkPath := filepath.Join(filepath.Dir(config.ManagerDbFile), ".db_bk_mount", s3Path, "db.bk.development")
-		os.Remove(config.ManagerDbFile)
+		localBkPath := filepath.Join(filepath.Dir(config.ManagerDBFile), ".db_bk_mount", s3Path, "db.bk.development")
+		os.Remove(config.ManagerDBFile)
 		forceBackups = true
 		defer func() {
 			forceBackups = false
 		}()
-		server, _, token, errs := serve(s3ServerConfig)
+		server, _, token, errs := serve(ctx, s3ServerConfig)
 		So(errs, ShouldBeNil)
 
 		defer func() {
 			// stop the server
-			server.Stop(true)
+			server.Stop(ctx, true)
 
 			// and delete the db.bk file in s3, which means we need to mount the
 			// thing ourselves
@@ -6551,7 +6546,7 @@ func TestJobqueueWithMounts(t *testing.T) {
 			}
 		}()
 
-		_, err := os.Stat(config.ManagerDbFile)
+		_, err := os.Stat(config.ManagerDBFile)
 		So(err, ShouldBeNil)
 		_, err = os.Stat(localBkPath)
 		So(err, ShouldNotBeNil)
@@ -6570,7 +6565,7 @@ func TestJobqueueWithMounts(t *testing.T) {
 
 			<-time.After(8 * time.Second)
 
-			info, err := os.Stat(config.ManagerDbFile)
+			info, err := os.Stat(config.ManagerDBFile)
 			So(err, ShouldBeNil)
 			So(info.Size(), ShouldEqual, 32768)
 			info2, err := os.Stat(localBkPath)
@@ -6582,14 +6577,14 @@ func TestJobqueueWithMounts(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 1)
 
-				server.Stop(true)
+				server.Stop(ctx, true)
 				wipeDevDBOnInit = false
 				defer func() {
 					wipeDevDBOnInit = true
 				}()
-				server, _, token, errs = serve(s3ServerConfig)
+				server, _, token, errs = serve(ctx, s3ServerConfig)
 				So(errs, ShouldBeNil)
-				defer server.Stop(true)
+				defer server.Stop(ctx, true)
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
 
@@ -6597,18 +6592,18 @@ func TestJobqueueWithMounts(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(len(jobsByRepGroup), ShouldEqual, 1)
 
-				server.Stop(true)
-				os.Remove(config.ManagerDbFile)
-				_, err = os.Stat(config.ManagerDbFile)
+				server.Stop(ctx, true)
+				os.Remove(config.ManagerDBFile)
+				_, err = os.Stat(config.ManagerDBFile)
 				So(err, ShouldNotBeNil)
 				_, err = os.Stat(localBkPath)
 				So(err, ShouldNotBeNil)
 
-				server, _, token, errs = serve(s3ServerConfig)
+				server, _, token, errs = serve(ctx, s3ServerConfig)
 				So(errs, ShouldBeNil)
-				defer server.Stop(true)
+				defer server.Stop(ctx, true)
 
-				info, err = os.Stat(config.ManagerDbFile)
+				info, err = os.Stat(config.ManagerDBFile)
 				So(err, ShouldBeNil)
 				So(info.Size(), ShouldEqual, 28672)
 				info2, err = os.Stat(localBkPath)
@@ -6636,7 +6631,7 @@ func TestJobqueueWithMounts(t *testing.T) {
 		}
 		defer os.RemoveAll(cwd)
 
-		server, _, token, err := serve(serverConfig)
+		server, _, token, err := serve(ctx, serverConfig)
 		So(err, ShouldBeNil)
 
 		standardReqs := &jqs.Requirements{RAM: 10, Time: 10 * time.Second, Cores: 1, Disk: 0, Other: make(map[string]string)}
@@ -6811,7 +6806,7 @@ func TestJobqueueWithMounts(t *testing.T) {
 
 		Reset(func() {
 			if server != nil {
-				server.Stop(true)
+				server.Stop(ctx, true)
 			}
 		})
 	})
@@ -6826,21 +6821,21 @@ func TestJobqueueSpeed(t *testing.T) {
 		t.Skip("skipping speed test")
 	}
 
-	config := internal.ConfigLoad("development", true, testLogger)
+	ctx := context.Background()
+	config := internal.ConfigLoadFromParentDir(ctx, "development")
 	serverConfig := ServerConfig{
 		Port:            config.ManagerPort,
 		WebPort:         config.ManagerWeb,
 		SchedulerName:   "local",
 		SchedulerConfig: &jqs.ConfigLocal{Shell: config.RunnerExecShell},
-		DBFile:          config.ManagerDbFile,
-		DBFileBackup:    config.ManagerDbBkFile,
+		DBFile:          config.ManagerDBFile,
+		DBFileBackup:    config.ManagerDBBkFile,
 		TokenFile:       config.ManagerTokenFile,
 		CAFile:          config.ManagerCAFile,
 		CertFile:        config.ManagerCertFile,
 		CertDomain:      config.ManagerCertDomain,
 		KeyFile:         config.ManagerKeyFile,
 		Deployment:      config.Deployment,
-		Logger:          testLogger,
 	}
 	addr := "localhost:" + config.ManagerPort
 
@@ -6849,7 +6844,7 @@ func TestJobqueueSpeed(t *testing.T) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	n := 50000
 
-	server, _, token, err := serve(serverConfig)
+	server, _, token, err := serve(ctx, serverConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -6937,7 +6932,7 @@ func TestJobqueueSpeed(t *testing.T) {
 	// per = int64(e.Nanoseconds() / int64(n))
 	// log.Printf("Added %d items to queue in %s == %d per\n", n, e, per)
 
-	server.Stop(true)
+	server.Stop(ctx, true)
 
 	/* test speed of bolt db when there are lots of jobs already stored
 	n := 10000000 // num jobs to start with
@@ -7150,7 +7145,7 @@ func runner(ctx context.Context) {
 	}
 	log.Printf("runner working on schedgrp %s\n", schedgrp)
 
-	config := internal.ConfigLoad(rdeployment, true, testLogger)
+	config := internal.ConfigLoadFromParentDir(ctx, rdeployment)
 
 	token, err := os.ReadFile(config.ManagerTokenFile)
 	if err != nil {

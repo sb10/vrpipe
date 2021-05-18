@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -25,6 +25,7 @@ configuration files and binaries as well as port forwarding.
 */
 
 import (
+	"context"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -127,7 +128,7 @@ func (c *Controller) HasSynced() bool {
 
 // Run starts SharedInformer watching for pods, and sends their keys to
 // workqueue. StopCh used to send interrupt.
-func (c *Controller) Run(stopCh <-chan struct{}) {
+func (c *Controller) Run(ctx context.Context, stopCh <-chan struct{}) {
 	c.Logger = c.Opts.Logger.New("deployment", "kubernetes")
 	c.createQueueAndInformer()
 	c.addEventHandlers()
@@ -144,24 +145,24 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	}
 
 	// keep processing items until we are stopped
-	go c.processItems(stopCh)
+	go c.processItems(ctx, stopCh)
 	<-stopCh
 }
 
 // processItems calls processNextItem() repeatedly until the given chan is
 // closed.
-func (c *Controller) processItems(stopCh <-chan struct{}) {
+func (c *Controller) processItems(ctx context.Context, stopCh <-chan struct{}) {
 	for {
 		select {
 		case <-stopCh:
 			return
 		default:
-			c.processNextItem()
+			c.processNextItem(ctx)
 		}
 	}
 }
 
-func (c *Controller) processNextItem() {
+func (c *Controller) processNextItem(ctx context.Context) {
 	// pull next key from queue. Look up key in cache.
 	key, quit := c.queue.Get()
 	if quit {
@@ -175,7 +176,7 @@ func (c *Controller) processNextItem() {
 	defer c.queue.Done(key)
 
 	// do processing on key
-	err := c.processItem(key.(string))
+	err := c.processItem(ctx, key.(string))
 	if err != nil {
 		if c.queue.NumRequeues(key) < maxRetries {
 			c.Error("processing queue item, will retry", "key", key, "error", err)
@@ -197,7 +198,7 @@ func (c *Controller) processNextItem() {
 
 // processItem(key) is where we define how to react to an item coming off the
 // work queue.
-func (c *Controller) processItem(key string) error {
+func (c *Controller) processItem(ctx context.Context, key string) error {
 	c.Debug("processing change to pod", "pod", key)
 
 	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
@@ -209,15 +210,15 @@ func (c *Controller) processItem(key string) error {
 		c.Debug("object deleted", "key", key, "obj", obj)
 		return nil
 	}
-	err = c.processObj(obj)
+	err = c.processObj(ctx, obj)
 	return err
 }
 
 // Process a generic object.
-func (c *Controller) processObj(obj interface{}) error {
+func (c *Controller) processObj(ctx context.Context, obj interface{}) error {
 	switch v := obj.(type) {
 	case *apiv1.Pod:
-		c.processPod(v)
+		c.processPod(ctx, v)
 	default:
 		return fmt.Errorf("obj is not a pod")
 	}
@@ -226,14 +227,14 @@ func (c *Controller) processObj(obj interface{}) error {
 
 // processPod defines how to react to a pod coming off the workqueue in an
 // observed state. Assumes there is only 1 initcontainer.
-func (c *Controller) processPod(obj *apiv1.Pod) {
+func (c *Controller) processPod(ctx context.Context, obj *apiv1.Pod) {
 	if len(obj.Status.InitContainerStatuses) >= 1 {
 		switch {
 		case obj.Status.InitContainerStatuses[0].State.Waiting != nil:
 			c.Debug("init container waiting!")
 		case obj.Status.InitContainerStatuses[0].State.Running != nil:
 			c.Debug("init container running, calling CopyTar", "files", c.Opts.Files)
-			err := c.Client.CopyTar(c.Opts.Files, obj)
+			err := c.Client.CopyTar(ctx, c.Opts.Files, obj)
 			if err != nil {
 				c.Error("copying tarball", "error", err)
 			}
@@ -279,7 +280,7 @@ func (c *Controller) processPod(obj *apiv1.Pod) {
 
 			c.Info("wr manager container is running, calling PortForward", "ports", c.Opts.RequiredPorts)
 			go func() {
-				err := c.Client.PortForward(obj, c.Opts.RequiredPorts)
+				err := c.Client.PortForward(ctx, obj, c.Opts.RequiredPorts)
 				if err != nil {
 					c.Error("Port forwarding error", "error", err)
 				}

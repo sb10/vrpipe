@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Ban <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -20,6 +20,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -34,10 +35,9 @@ import (
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/kubernetes/client"
 	kubedeployment "github.com/VertebrateResequencing/wr/kubernetes/deployment"
-	"github.com/inconshreveable/log15"
 	"github.com/kardianos/osext"
-	"github.com/sb10/l15h"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-ssg/wr/clog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -148,7 +148,8 @@ See https://kubernetes.io/docs/concepts/containers/images/ for more details.
 Authenticating against the cluster will be attempted, by default, with the file
 pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		kubeLogger := setupLogging(kubeDebug)
+		ctx := context.Background()
+		// kubeLogger := setupLogging(kubeDebug)
 
 		// Read in post creation script
 		var postCreation []byte
@@ -249,7 +250,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 		resourcePath := filepath.Join(config.ManagerDir, "kubernetes_resources")
 
 		// Authenticate and populate Kubernetesp with clientset and restconfig.
-		c.Clientset, c.Restconfig, err = c.Client.Authenticate(client.AuthConfig{Logger: kubeLogger, KubeConfigPath: kubeConfig})
+		c.Clientset, c.Restconfig, err = c.Client.Authenticate(ctx, client.AuthConfig{KubeConfigPath: kubeConfig})
 		if err != nil {
 			die("could not get authentication details for the cluster: %s", err)
 		}
@@ -290,7 +291,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 				kubeDeploy = true
 			} else {
 				// Read the namespace resource file
-				resources, err := openResources(resourcePath)
+				resources, err := openResources(ctx, resourcePath)
 				if err != nil {
 					die("failed to open resource file with path %s: %s", resourcePath, err)
 				}
@@ -332,7 +333,8 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 				warn("failed to remove temporary config file: %s", errr)
 			}
 		}()
-		_, errt = tmpConfigFile.Write([]byte(fmt.Sprintf("managerport: \"%d\"\nmanagerweb: \"%d\"\nmanagerdbbkfile: \"%s\"\n", mp, wp, config.ManagerDbBkFile)))
+		_, errt = tmpConfigFile.Write([]byte(fmt.Sprintf("managerport: \"%d\"\nmanagerweb: \"%d\"\nmanagerdbbkfile: \"%s\"\n",
+			mp, wp, config.ManagerDBBkFile)))
 		if errt != nil {
 			die("failed to write to temporary config file: %s", errt)
 		}
@@ -356,7 +358,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 			// determine the name of the pod to fetch the client.token from.
 
 			// Read the manager pod's name from resource file
-			resources, err := openResources(resourcePath)
+			resources, err := openResources(ctx, resourcePath)
 			if err != nil {
 				die("failed to open resource file with path %s: %s", resourcePath, err)
 			}
@@ -384,11 +386,8 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 
 			// Set up logging to file
 			kubeLogFile := filepath.Join(config.ManagerDir, kubeLogFileName)
-			fh, err := log15.FileHandler(kubeLogFile, log15.LogfmtFormat())
-			if err != nil {
+			if err := clog.ToFileAtLevel(kubeLogFile, "warn"); err != nil {
 				warn("wr manager could not log to %s: %s", kubeLogFile, err)
-			} else {
-				l15h.AddHandler(appLogger, fh)
 			}
 
 			defer func() {
@@ -421,9 +420,9 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 				// Populate the rest of Kubernetesp. If there is a predefined
 				// namespace set, use it.
 				if len(kubeNamespace) != 0 {
-					err = c.Client.Initialize(c.Clientset, kubeNamespace)
+					err = c.Client.Initialize(ctx, c.Clientset, kubeNamespace)
 				} else {
-					err = c.Client.Initialize(c.Clientset)
+					err = c.Client.Initialize(ctx, c.Clientset)
 				}
 				if err != nil {
 					die("Failed to initialise clients: %s", err)
@@ -461,9 +460,9 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 				if err != nil {
 					warn("Failed to encode resource file: %s", err)
 				}
-				internal.LogClose(appLogger, file, "resource file", "path", resourcePath)
+				internal.LogClose(ctx, file, "resource file", "path", resourcePath)
 			} else {
-				resources, erro := openResources(resourcePath)
+				resources, erro := openResources(ctx, resourcePath)
 				if erro != nil {
 					die("failed to open resource file with path %s: %s", resourcePath, erro)
 				}
@@ -473,7 +472,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 
 				// Populate the rest of Kubernetesp
 				info("initialising to namespace %s", kubeNamespace)
-				err = c.Client.Initialize(c.Clientset, kubeNamespace)
+				err = c.Client.Initialize(ctx, c.Clientset, kubeNamespace)
 				if err != nil {
 					die("Failed to initialise client to namespace %s: %s", kubeNamespace, err)
 				}
@@ -513,14 +512,14 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 				ConfigMapName:   configMapName,
 				ConfigMountPath: podScriptDir,
 				RequiredPorts:   []int{mp, wp},
-				Logger:          appLogger,
 				ResourcePath:    resourcePath,
 			}
 
 			// Create the deployment if an existing one does not exist
 			if kubeDeploy {
 				info("creating wr deployment")
-				err = c.Client.Deploy(c.Opts.TempMountPath, c.Opts.BinaryPath, c.Opts.BinaryArgs, managerConfigMapName, c.Opts.ConfigMountPath, c.Opts.RequiredPorts)
+				err = c.Client.Deploy(ctx, c.Opts.TempMountPath, c.Opts.BinaryPath, c.Opts.BinaryArgs, managerConfigMapName,
+					c.Opts.ConfigMountPath, c.Opts.RequiredPorts)
 				if err != nil {
 					die("failed to create deployment: %s", err)
 				}
@@ -531,7 +530,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 			signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 			stopCh := make(chan struct{})
 			info("starting controller")
-			go c.Run(stopCh)
+			go c.Run(ctx, stopCh)
 			<-sigs
 			close(stopCh)
 			info("gracefully stopped controller after receiving signal")
@@ -561,12 +560,13 @@ If you don't back up to S3, the teardown command tries to copy the remote
 database locally, which is only possible while the pod is still up and
 accessible.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		kubeLogger := setupLogging(kubeDebug)
+		ctx := context.Background()
+		setupLogging(kubeDebug)
 
 		// before stopping the manager, make sure we can interact with the
 		// cluster - that our credentials are correct.
 		Client := &client.Kubernetesp{}
-		clientset, _, err := Client.Authenticate(client.AuthConfig{Logger: kubeLogger, KubeConfigPath: kubeConfig})
+		clientset, _, err := Client.Authenticate(ctx, client.AuthConfig{KubeConfigPath: kubeConfig})
 		if err != nil {
 			die("could not get authentication details for the cluster: %s", err)
 		}
@@ -577,7 +577,7 @@ accessible.`,
 
 		resourcePath := filepath.Join(config.ManagerDir, "kubernetes_resources")
 
-		resources, err := openResources(resourcePath)
+		resources, err := openResources(ctx, resourcePath)
 		if err != nil {
 			die("failed to open resource file with path %s: %s", resourcePath, err)
 		}
@@ -594,13 +594,13 @@ accessible.`,
 			jq := connect(1*time.Second, true)
 			if jq != nil {
 				var syncMsg string
-				if internal.IsRemote(config.ManagerDbBkFile) {
-					if _, errf := os.Stat(config.ManagerDbFile); !os.IsNotExist(errf) {
+				if internal.IsRemote(config.ManagerDBBkFile) {
+					if _, errf := os.Stat(config.ManagerDBFile); !os.IsNotExist(errf) {
 						// Move aside the local database so that if the manager
 						// is started locally, the database will be restored
 						// from S3 and have the history of what was run in the
 						// cloud.
-						if errf = os.Rename(config.ManagerDbFile, config.ManagerDbFile+".old"); err == nil {
+						if errf = os.Rename(config.ManagerDBFile, config.ManagerDBFile+".old"); err == nil {
 							syncMsg = "; the local database will be updated from S3 if manager started locally"
 						} else {
 							warn("could not rename the local database; if the manager is started locally, it will not be updated with the latest changes in S3! %s", errf)
@@ -613,7 +613,7 @@ accessible.`,
 					// is "fine"; though some db writes may occur, the user
 					// obviously doesn't care about them. On recovery we won't
 					// break any pipelines.
-					errf := jq.BackupDB(config.ManagerDbFile)
+					errf := jq.BackupDB(config.ManagerDBFile)
 					if errf != nil {
 						msg := "there was an error trying to sync the remote database: " + errf.Error()
 						if forceTearDown {
@@ -713,7 +713,7 @@ accessible.`,
 			nameSpace = resources.Details["namespace"]
 		}
 		info("deleting namespace %s", nameSpace)
-		err = Client.TearDown(nameSpace)
+		err = Client.TearDown(ctx, nameSpace)
 		if err != nil {
 			die("failed to delete the kubernetes resources previously created: %s", err)
 		}
@@ -743,12 +743,13 @@ accessible.`,
 }
 
 func init() {
+	ctx := context.Background()
 	RootCmd.AddCommand(kubeCmd)
 	kubeCmd.AddCommand(kubeDeployCmd)
 	kubeCmd.AddCommand(kubeTearDownCmd)
 
 	// flags specific to these sub-commands
-	defaultConfig := internal.DefaultConfig(appLogger)
+	defaultConfig := internal.DefaultConfig(ctx)
 	defaultKubeConfig := client.AuthConfig{}.ConfigPath()
 	kubeDeployCmd.Flags().StringVarP(&podPostCreationScript, "script", "s", defaultConfig.CloudScript, "path to a start-up script that will be run on each pod created")
 	kubeDeployCmd.Flags().IntVarP(&serverKeepAlive, "keepalive", "k", defaultConfig.CloudKeepAlive, "how long in seconds to keep idle spawned pods alive for; 0 means forever")
@@ -832,7 +833,7 @@ func rewriteConfigFiles(configFiles string) []client.FilePair {
 }
 
 // Open a resource file with the provided path
-func openResources(resourcePath string) (*cloud.Resources, error) {
+func openResources(ctx context.Context, resourcePath string) (*cloud.Resources, error) {
 	resources := &cloud.Resources{}
 	file, err := os.Open(resourcePath)
 	if err != nil {
@@ -844,7 +845,7 @@ func openResources(resourcePath string) (*cloud.Resources, error) {
 		die("error decoding resource file %s: %s", resourcePath, err)
 	}
 
-	internal.LogClose(appLogger, file, "resource file", "path", resourcePath)
+	internal.LogClose(ctx, file, "resource file", "path", resourcePath)
 
 	return resources, err
 }

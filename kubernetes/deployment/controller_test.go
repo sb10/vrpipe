@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package deployment_test
 
 import (
+	"context"
 	"encoding/gob"
 	"fmt"
 	"math/rand"
@@ -51,10 +52,11 @@ var dir string
 // manager can be connected to.
 
 func init() {
+	ctx := context.Background()
 	dc = kubedeployment.Controller{
 		Client: &client.Kubernetesp{},
 	}
-	dc.Clientset, dc.Restconfig, autherr = dc.Client.Authenticate(client.AuthConfig{})
+	dc.Clientset, dc.Restconfig, autherr = dc.Client.Authenticate(ctx, client.AuthConfig{})
 	if autherr != nil {
 		skip = true
 		return
@@ -70,7 +72,7 @@ func init() {
 		return
 	}
 
-	autherr = dc.Client.Initialize(dc.Clientset, testingNamespace)
+	autherr = dc.Client.Initialize(ctx, dc.Clientset, testingNamespace)
 	if autherr != nil {
 		skip = true
 		return
@@ -88,9 +90,10 @@ func TestDeploy(t *testing.T) {
 		t.Skip("skipping test; failed to access cluster")
 	}
 
+	ctx := context.Background()
 	testLogger := log15.New()
 	testLogger.SetHandler(log15.LvlFilterHandler(log15.LvlWarn, log15.StderrHandler))
-	config := internal.ConfigLoad("development", true, testLogger)
+	config := internal.ConfigLoadFromParentDir(ctx, "development")
 	mPort, err := strconv.Atoi(config.ManagerPort)
 	if err != nil {
 		t.Fatal("could not determine manager port")
@@ -151,7 +154,7 @@ func TestDeploy(t *testing.T) {
 
 		// Create the deployment we run the init script created from wherever
 		// we've decided to mount it.
-		err = dc.Client.Deploy(c.tempMountPath,
+		err = dc.Client.Deploy(ctx, c.tempMountPath,
 			c.configMountPath+client.DefaultScriptName,
 			c.cmdArgs, configmap.ObjectMeta.Name,
 			c.configMountPath, c.requiredPorts)
@@ -208,7 +211,7 @@ func TestDeploy(t *testing.T) {
 		stopCh := make(chan struct{})
 		defer close(stopCh)
 		go func() {
-			dc.Run(stopCh)
+			dc.Run(ctx, stopCh)
 		}()
 
 		// Don't move this to a new test, the call to connect() waits and keeps

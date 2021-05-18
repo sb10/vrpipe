@@ -1,4 +1,4 @@
-// Copyright © 2019 Genome Research Limited
+// Copyright © 2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -22,6 +22,7 @@ package limiter
 // package, the Limiter.
 
 import (
+	"context"
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
@@ -33,7 +34,7 @@ import (
 // a group from some on-disk database, so you don't have to have all group
 // limits in memory. (Limiter itself will clear out unused groups from its own
 // memory.)
-type SetLimitCallback func(name string) int
+type SetLimitCallback func(context.Context, string) int
 
 // Limiter struct is used to limit usage of groups.
 type Limiter struct {
@@ -64,11 +65,11 @@ func (l *Limiter) SetLimit(name string, limit uint) {
 
 // GetLimit tells you the limit currently set for the given group. If the group
 // doesn't exist, returns -1.
-func (l *Limiter) GetLimit(name string) int {
+func (l *Limiter) GetLimit(ctx context.Context, name string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	group := l.vivifyGroup(name)
+	group := l.vivifyGroup(ctx, name)
 	if group == nil {
 		return -1
 	}
@@ -111,10 +112,10 @@ func (l *Limiter) RemoveLimit(name string) {
 //
 // If an optional wait duration is supplied, will wait for up to the given wait
 // period for an increment of every group to be possible.
-func (l *Limiter) Increment(groups []string, wait ...time.Duration) bool {
+func (l *Limiter) Increment(ctx context.Context, groups []string, wait ...time.Duration) bool {
 	l.mu.Lock()
-	if l.checkGroups(groups) {
-		l.incrementGroups(groups)
+	if l.checkGroups(ctx, groups) {
+		l.incrementGroups(ctx, groups)
 		l.mu.Unlock()
 		return true
 	}
@@ -125,7 +126,7 @@ func (l *Limiter) Increment(groups []string, wait ...time.Duration) bool {
 	}
 
 	ch := make(chan bool, len(groups))
-	l.registerGroupNotifications(groups, ch)
+	l.registerGroupNotifications(ctx, groups, ch)
 	l.mu.Unlock()
 
 	limit := time.After(wait[0])
@@ -133,13 +134,13 @@ func (l *Limiter) Increment(groups []string, wait ...time.Duration) bool {
 		select {
 		case <-ch:
 			l.mu.Lock()
-			if l.checkGroups(groups) {
-				l.incrementGroups(groups)
+			if l.checkGroups(ctx, groups) {
+				l.incrementGroups(ctx, groups)
 				l.mu.Unlock()
 				return true
 			}
 			ch = make(chan bool, len(groups))
-			l.registerGroupNotifications(groups, ch)
+			l.registerGroupNotifications(ctx, groups, ch)
 			l.mu.Unlock()
 			continue
 		case <-limit:
@@ -151,9 +152,9 @@ func (l *Limiter) Increment(groups []string, wait ...time.Duration) bool {
 // checkGroups checks all the groups to see if they can be incremented. You must
 // hold the mu.lock before calling this, and until after calling
 // incrementGroups() if this returns true.
-func (l *Limiter) checkGroups(groups []string) bool {
+func (l *Limiter) checkGroups(ctx context.Context, groups []string) bool {
 	for _, name := range groups {
-		group := l.vivifyGroup(name)
+		group := l.vivifyGroup(ctx, name)
 		if group != nil {
 			if !group.canIncrement() {
 				return false
@@ -165,9 +166,9 @@ func (l *Limiter) checkGroups(groups []string) bool {
 
 // incrementGroups increments all the groups without checking them. You must
 // hold the mu.lock before calling this (and check first).
-func (l *Limiter) incrementGroups(groups []string) {
+func (l *Limiter) incrementGroups(ctx context.Context, groups []string) {
 	for _, name := range groups {
-		group := l.vivifyGroup(name)
+		group := l.vivifyGroup(ctx, name)
 		if group != nil {
 			group.increment()
 		}
@@ -178,10 +179,10 @@ func (l *Limiter) incrementGroups(groups []string) {
 // results of calling the SetLimitCallback. You must have the mu.Lock() before
 // calling this. Can return nil if the callback doesn't know about this group
 // and returns a -1 limit.
-func (l *Limiter) vivifyGroup(name string) *group {
+func (l *Limiter) vivifyGroup(ctx context.Context, name string) *group {
 	group, exists := l.groups[name]
 	if !exists {
-		if limit := l.cb(name); limit >= 0 {
+		if limit := l.cb(ctx, name); limit >= 0 {
 			group = newGroup(name, uint(limit))
 			l.groups[name] = group
 		}
@@ -191,9 +192,9 @@ func (l *Limiter) vivifyGroup(name string) *group {
 
 // registerGroupNotifications passes the channel to each group to be notified of
 // decrement() calls on them.
-func (l *Limiter) registerGroupNotifications(groups []string, ch chan bool) {
+func (l *Limiter) registerGroupNotifications(ctx context.Context, groups []string, ch chan bool) {
 	for _, name := range groups {
-		group := l.vivifyGroup(name)
+		group := l.vivifyGroup(ctx, name)
 		if group != nil {
 			group.notifyDecrement(ch)
 		}
@@ -222,13 +223,13 @@ func (l *Limiter) Decrement(groups []string) {
 
 // GetLowestLimit tells you the lowest limit currently set amongst the given
 // groups. If none have a limit set, returns -1.
-func (l *Limiter) GetLowestLimit(groups []string) int {
+func (l *Limiter) GetLowestLimit(ctx context.Context, groups []string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	lowest := -1
 	for _, name := range groups {
-		group := l.vivifyGroup(name)
+		group := l.vivifyGroup(ctx, name)
 		if group != nil && (lowest == -1 || int(group.limit) < lowest) {
 			lowest = int(group.limit)
 		}
@@ -238,13 +239,13 @@ func (l *Limiter) GetLowestLimit(groups []string) int {
 
 // GetRemainingCapacity tells you how many times you could Increment() the given
 // groups. If none have a limit set, returns -1.
-func (l *Limiter) GetRemainingCapacity(groups []string) int {
+func (l *Limiter) GetRemainingCapacity(ctx context.Context, groups []string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	lowest := -1
 	for _, name := range groups {
-		group := l.vivifyGroup(name)
+		group := l.vivifyGroup(ctx, name)
 		if group != nil {
 			capacity := group.capacity()
 			if lowest == -1 || capacity < lowest {

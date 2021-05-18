@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -20,6 +20,7 @@ package client
 
 import (
 	"archive/tar"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wtsi-ssg/wr/clog"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -140,7 +142,7 @@ func makeTar(files []FilePair, writer io.Writer) error {
 // AttachCmd attaches to a running container and pipes StdIn to the command
 // running on that container if StdIn is supplied. Should work only after
 // calling Authenticate().
-func (p *Kubernetesp) AttachCmd(opts *CmdOptions) error {
+func (p *Kubernetesp) AttachCmd(ctx context.Context, opts *CmdOptions) error {
 	// Make a request to the APIServer for an 'attach' action. Open Stdin and
 	// Stderr for use by the client.
 	execRequest := p.RESTClient.Post().
@@ -172,7 +174,7 @@ func (p *Kubernetesp) AttachCmd(opts *CmdOptions) error {
 		Tty:    false,
 	})
 	if err != nil {
-		p.Error("AttachCmd returned error", "error", opts.Err)
+		clog.Error(ctx, "AttachCmd returned error", "error", opts.Err)
 		return fmt.Errorf("error executing remote command: %v", err)
 	}
 
@@ -256,9 +258,9 @@ func (p *Kubernetesp) ExecInPod(podName string, containerName, namespace string,
 
 // PortForward sets up port forwarding to the manager that is running inside the
 // cluster.
-func (p *Kubernetesp) PortForward(pod *apiv1.Pod, requiredPorts []int) error {
+func (p *Kubernetesp) PortForward(ctx context.Context, pod *apiv1.Pod, requiredPorts []int) error {
 	if pod.Status.Phase != apiv1.PodRunning {
-		p.Error("unable to forward port because pod is not running.", "status", pod.Status.Phase, "pod", pod.ObjectMeta.Name)
+		clog.Error(ctx, "unable to forward port because pod is not running.", "status", pod.Status.Phase, "pod", pod.ObjectMeta.Name)
 		return fmt.Errorf("unable to forward port because pod is not running. Current status=%v", pod.Status.Phase)
 	}
 
@@ -294,8 +296,8 @@ func (p *Kubernetesp) forwardPorts(url *url.URL, requiredPorts []string) error {
 
 // CopyTar copies the files defined in each filePair in files to the pod
 // provided. Called by controller when initContainer status is running.
-func (p *Kubernetesp) CopyTar(files []FilePair, pod *apiv1.Pod) error {
-	p.Debug("copyTar Called", "files", files, "pod", pod.ObjectMeta.Name)
+func (p *Kubernetesp) CopyTar(ctx context.Context, files []FilePair, pod *apiv1.Pod) error {
+	clog.Debug(ctx, "copyTar Called", "files", files, "pod", pod.ObjectMeta.Name)
 
 	// Set up new pipe
 	pipeReader, pipeWriter := io.Pipe()
@@ -306,13 +308,13 @@ func (p *Kubernetesp) CopyTar(files []FilePair, pod *apiv1.Pod) error {
 		defer func() {
 			errc := pipeWriter.Close()
 			if errc != nil {
-				p.Error("error closing tar pipe", "err", errc)
+				clog.Error(ctx, "error closing tar pipe", "err", errc)
 			}
 		}()
 
 		err = makeTar(files, pipeWriter)
 		if err != nil {
-			p.Error("error writing tar", "err", err)
+			clog.Error(ctx, "error writing tar", "err", err)
 		}
 		close(done)
 	}()
@@ -335,15 +337,15 @@ func (p *Kubernetesp) CopyTar(files []FilePair, pod *apiv1.Pod) error {
 		},
 	}
 
-	err = p.AttachCmd(opts)
+	err = p.AttachCmd(ctx, opts)
 	if err != nil {
-		p.Error("error running AttachCmd for CopyTar", "err", err)
+		clog.Error(ctx, "error running AttachCmd for CopyTar", "err", err)
 	}
 
 	<-done
 
-	p.Debug("contents of stdOut", stdOut.Str)
-	p.Debug("contents of stdErr", stdErr.Str)
+	clog.Debug(ctx, "contents of stdOut", stdOut.Str)
+	clog.Debug(ctx, "contents of stdErr", stdErr.Str)
 	return err
 }
 

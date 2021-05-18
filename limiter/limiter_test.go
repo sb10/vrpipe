@@ -1,4 +1,4 @@
-// Copyright © 2019 Genome Research Limited
+// Copyright © 2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package limiter
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,10 +30,11 @@ import (
 )
 
 func BenchmarkLimiterIncDec(b *testing.B) {
+	ctx := context.Background()
 	limits := make(map[string]int)
 	limits["l1"] = 5
 	limits["l2"] = 6
-	cb := func(name string) int {
+	cb := func(ctx context.Context, name string) int {
 		if limit, exists := limits[name]; exists {
 			return limit
 		}
@@ -44,16 +46,16 @@ func BenchmarkLimiterIncDec(b *testing.B) {
 
 	for n := 0; n < b.N; n++ {
 		l := New(cb)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
-		l.Increment(both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
+		l.Increment(ctx, both)
 		l.Decrement(both)
 		l.Decrement(both)
 		l.Decrement(both)
@@ -61,16 +63,16 @@ func BenchmarkLimiterIncDec(b *testing.B) {
 		l.Decrement(both)
 		l.Decrement(both)
 
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
-		l.Increment(first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
+		l.Increment(ctx, first)
 		l.Decrement(first)
 		l.Decrement(first)
 		l.Decrement(first)
@@ -80,10 +82,11 @@ func BenchmarkLimiterIncDec(b *testing.B) {
 	}
 }
 func BenchmarkLimiterCapacity(b *testing.B) {
+	ctx := context.Background()
 	limits := make(map[string]int)
 	limits["l1"] = 5
 	limits["l2"] = 6
-	cb := func(name string) int {
+	cb := func(ctx context.Context, name string) int {
 		if limit, exists := limits[name]; exists {
 			return limit
 		}
@@ -95,15 +98,15 @@ func BenchmarkLimiterCapacity(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		l := New(cb)
 		for {
-			l.Increment(both)
-			cap := l.GetRemainingCapacity(both)
+			l.Increment(ctx, both)
+			cap := l.GetRemainingCapacity(ctx, both)
 			if cap == 0 {
 				break
 			}
 		}
 		for {
 			l.Decrement(both)
-			cap := l.GetRemainingCapacity(both)
+			cap := l.GetRemainingCapacity(ctx, both)
 			if cap == 5 {
 				break
 			}
@@ -112,13 +115,14 @@ func BenchmarkLimiterCapacity(b *testing.B) {
 }
 
 func TestLimiter(t *testing.T) {
+	ctx := context.Background()
 	Convey("You can make a new Limiter with a limit defining callback", t, func() {
 		limits := make(map[string]int)
 		limits["l1"] = 3
 		limits["l2"] = 2
 		limits["l4"] = 100
 		limits["l5"] = 200
-		cb := func(name string) int {
+		cb := func(ctx context.Context, name string) int {
 			if limit, exists := limits[name]; exists {
 				return limit
 			}
@@ -129,63 +133,63 @@ func TestLimiter(t *testing.T) {
 		So(l, ShouldNotBeNil)
 
 		Convey("Increment and Decrement work as expected", func() {
-			So(l.Increment([]string{"l1", "l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l1", "l2"}), ShouldBeTrue)
 			l.Decrement([]string{"l1", "l2"})
 
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeFalse)
-			So(l.Increment([]string{"l1", "l2"}), ShouldBeFalse)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeFalse)
+			So(l.Increment(ctx, []string{"l1", "l2"}), ShouldBeFalse)
 			l.Decrement([]string{"l1", "l2"})
-			So(l.Increment([]string{"l1", "l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l1", "l2"}), ShouldBeTrue)
 			l.Decrement([]string{"l2"})
-			So(l.Increment([]string{"l1", "l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l1", "l2"}), ShouldBeTrue)
 
-			So(l.Increment([]string{"l3"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l3"}), ShouldBeTrue)
 			l.Decrement([]string{"l3"})
 		})
 
 		Convey("You can change limits with SetLimit(), and Decrement() forgets about unused groups", func() {
 			groups := []string{"l1", "l2"}
 			two := []string{"l2"}
-			So(l.GetLowestLimit(groups), ShouldEqual, 2)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 2)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 1)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 0)
-			So(l.Increment(two), ShouldBeFalse)
+			So(l.GetLowestLimit(ctx, groups), ShouldEqual, 2)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 2)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 1)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 0)
+			So(l.Increment(ctx, two), ShouldBeFalse)
 			l.SetLimit("l2", 3)
-			So(l.GetLowestLimit(groups), ShouldEqual, 3)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 1)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 0)
-			So(l.Increment(two), ShouldBeFalse)
+			So(l.GetLowestLimit(ctx, groups), ShouldEqual, 3)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 1)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 0)
+			So(l.Increment(ctx, two), ShouldBeFalse)
 			l.Decrement(two)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 1)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 1)
 			l.Decrement(two)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 2)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 2)
 			l.Decrement(two)
 			// at this point l2 should have been forgotten about, which means
 			// we forgot we set the limit to 3
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 2)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 2)
 			l.Decrement(two) // doesn't panic or something
-			So(l.GetLowestLimit(groups), ShouldEqual, 2)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 2)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 0)
-			So(l.Increment(two), ShouldBeFalse)
+			So(l.GetLowestLimit(ctx, groups), ShouldEqual, 2)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 2)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 0)
+			So(l.Increment(ctx, two), ShouldBeFalse)
 			l.Decrement(two)
 			l.Decrement(two)
 			limits["l2"] = 3
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 3)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.GetLowestLimit(groups), ShouldEqual, 3)
-			So(l.GetRemainingCapacity(groups), ShouldEqual, 2)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.Increment(two), ShouldBeTrue)
-			So(l.Increment(two), ShouldBeFalse)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 3)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.GetLowestLimit(ctx, groups), ShouldEqual, 3)
+			So(l.GetRemainingCapacity(ctx, groups), ShouldEqual, 2)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.Increment(ctx, two), ShouldBeTrue)
+			So(l.Increment(ctx, two), ShouldBeFalse)
 		})
 
 		Convey("You can set multiple limits and then get them all", func() {
@@ -197,28 +201,28 @@ func TestLimiter(t *testing.T) {
 
 		Convey("You can have limits of 0 and also RemoveLimit()s", func() {
 			l.SetLimit("l2", 0)
-			So(l.Increment([]string{"l2"}), ShouldBeFalse)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeFalse)
 
 			limits["l2"] = 0
 			l.RemoveLimit("l2")
-			So(l.Increment([]string{"l2"}), ShouldBeFalse)
-			So(l.GetLimit("l2"), ShouldEqual, 0)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeFalse)
+			So(l.GetLimit(ctx, "l2"), ShouldEqual, 0)
 
 			limits["l2"] = -1
-			So(l.Increment([]string{"l2"}), ShouldBeFalse)
-			So(l.GetLimit("l2"), ShouldEqual, 0)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeFalse)
+			So(l.GetLimit(ctx, "l2"), ShouldEqual, 0)
 
 			l.RemoveLimit("l2")
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.Increment([]string{"l2"}), ShouldBeTrue)
-			So(l.GetLimit("l2"), ShouldEqual, -1)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.Increment(ctx, []string{"l2"}), ShouldBeTrue)
+			So(l.GetLimit(ctx, "l2"), ShouldEqual, -1)
 		})
 
 		Convey("Concurrent SetLimit(), Increment() and Decrement() work", func() {
@@ -233,7 +237,7 @@ func TestLimiter(t *testing.T) {
 					if i%2 == 0 {
 						groups = []string{"l5", "l4"}
 					}
-					if l.Increment(groups) {
+					if l.Increment(ctx, groups) {
 						atomic.AddUint64(&incs, 1)
 						time.Sleep(100 * time.Millisecond)
 						l.Decrement(groups)
@@ -253,9 +257,9 @@ func TestLimiter(t *testing.T) {
 
 		Convey("Concurrent Increment()s at the limit work with wait times", func() {
 			groups := []string{"l1", "l2"}
-			So(l.Increment(groups), ShouldBeTrue)
-			So(l.Increment(groups), ShouldBeTrue)
-			So(l.Increment(groups), ShouldBeFalse)
+			So(l.Increment(ctx, groups), ShouldBeTrue)
+			So(l.Increment(ctx, groups), ShouldBeTrue)
+			So(l.Increment(ctx, groups), ShouldBeFalse)
 			start := time.Now()
 
 			go func() {
@@ -281,7 +285,7 @@ func TestLimiter(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if l.Increment(groups, wait) {
+					if l.Increment(ctx, groups, wait) {
 						if time.Since(start) < 35*time.Millisecond {
 							atomic.AddUint64(&quickIncs, 1)
 						} else {

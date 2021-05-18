@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -21,6 +21,7 @@
 package maxcluster
 
 import (
+	"context"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -32,7 +33,6 @@ import (
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/kubernetes/client"
-	"github.com/inconshreveable/log15"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -46,17 +46,16 @@ import (
 var tc client.Kubernetesp
 var clientset kubernetes.Interface
 var autherr error
-var config internal.Config
-var logger log15.Logger
+var config *internal.Config
 var token []byte
 var jq *jobqueue.Client
 var skip bool
 
 func init() {
-	logger = log15.New()
+	ctx := context.Background()
 
 	tc = client.Kubernetesp{}
-	clientset, _, autherr = tc.Authenticate(client.AuthConfig{})
+	clientset, _, autherr = tc.Authenticate(ctx, client.AuthConfig{})
 	if autherr != nil {
 		skip = true
 		return
@@ -69,7 +68,7 @@ func init() {
 		return
 	}
 
-	config = internal.ConfigLoad(internal.Development, false, logger)
+	config = internal.ConfigLoadFromCurrentDir(ctx, internal.Development)
 	resourcePath := filepath.Join(config.ManagerDir, "kubernetes_resources")
 	resources := &cloud.Resources{}
 
@@ -98,7 +97,7 @@ func init() {
 		return
 	}
 
-	autherr = tc.Initialize(clientset, resources.Details["namespace"])
+	autherr = tc.Initialize(ctx, clientset, resources.Details["namespace"])
 	if autherr != nil {
 		skip = true
 		return

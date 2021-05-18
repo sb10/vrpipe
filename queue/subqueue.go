@@ -1,4 +1,4 @@
-// Copyright © 2016, 2019 Genome Research Limited
+// Copyright © 2016, 2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -27,7 +27,6 @@ import (
 
 	sync "github.com/sasha-s/go-deadlock"
 
-	"github.com/inconshreveable/log15"
 	logext "github.com/inconshreveable/log15/ext"
 )
 
@@ -38,24 +37,15 @@ type subQueue struct {
 	sqIndex                  int
 	reserveGroup             string
 	pushNotificationChannels map[string]map[string]chan bool
-	log15.Logger
 }
 
 // create a new subQueue that can hold *Items in "priority" order. sqIndex is
 // one of 0 (priority is based on the item's delay), 1 (priority is based on the
 // item's priority or creation) or 2 (priority is based on the item's ttr).
-func newSubQueue(sqIndex int, logger ...log15.Logger) *subQueue {
-	var l log15.Logger
-	if len(logger) == 1 {
-		l = logger[0].New()
-	} else {
-		l = log15.New()
-		l.SetHandler(log15.DiscardHandler())
-	}
+func newSubQueue(sqIndex int) *subQueue {
 	queue := &subQueue{
 		sqIndex:                  sqIndex,
 		pushNotificationChannels: make(map[string]map[string]chan bool),
-		Logger:                   l,
 	}
 	if sqIndex == 1 {
 		queue.groupedItems = make(map[string][]*Item)
