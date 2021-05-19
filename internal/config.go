@@ -313,10 +313,10 @@ func getEnvVarsConfig(ctx context.Context) *Config {
 // merge compares existing to new Config values, and for each one that has
 // changed, sets the given source on the changed property in our sources, and
 // sets the new value on ourselves.
-func (c *Config) merge(new *Config, source string) {
+func (c *Config) merge(newC *Config, source string) {
 	v := reflect.ValueOf(*c)
 	typeOfC := v.Type()
-	vNew := reflect.ValueOf(*new)
+	vNew := reflect.ValueOf(*newC)
 
 	if c.sources == nil {
 		c.sources = make(map[string]string)
@@ -376,7 +376,7 @@ func (c *Config) configLoadFromFile(ctx context.Context, path string) {
 
 // clone makes a new Config with our values.
 func (c *Config) clone() *Config {
-	new := &Config{}
+	newC := &Config{}
 
 	v := reflect.ValueOf(*c)
 	typeOfC := v.Type()
@@ -387,16 +387,16 @@ func (c *Config) clone() *Config {
 			continue
 		}
 
-		adrField := reflect.ValueOf(new).Elem().Field(i)
+		adrField := reflect.ValueOf(newC).Elem().Field(i)
 		setSourceOnChangeProp(typeOfC, adrField, v, i)
 	}
 
-	new.sources = make(map[string]string)
+	newC.sources = make(map[string]string)
 	for key, val := range c.sources {
-		new.sources[key] = val
+		newC.sources[key] = val
 	}
 
-	return new
+	return newC
 }
 
 // setSourceOnChangeProp sets the source of a property, when its value is

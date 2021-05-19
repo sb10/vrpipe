@@ -346,15 +346,6 @@ func New(ctx context.Context, name string, resourceName string, savePath string)
 	p.Name = name
 	p.savePath = savePath + "." + resourceName
 
-	// var l log15.Logger
-	// if len(logger) == 1 {
-	// 	l = logger[0].New()
-	// } else {
-	// 	l = log15.New()
-	// 	l.SetHandler(log15.DiscardHandler())
-	// }
-	// p.Logger = l
-
 	// load any resources we previously saved, or get an empty set to work
 	// with
 	var err error

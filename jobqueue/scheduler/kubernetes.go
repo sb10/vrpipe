@@ -165,12 +165,7 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	s.config = config.(*ConfigKubernetes)
 
 	kubeLogFile := filepath.Join(s.config.ManagerDir, kubeSchedulerLog)
-	// fh, err := log15.FileHandler(kubeLogFile, log15.LogfmtFormat())
-	// if err != nil {
-	// 	return fmt.Errorf("wr kubernetes scheduler could not log to %s: %s", kubeLogFile, err)
-	// }
 
-	// l15h.AddHandler(s.Logger, fh)
 	clog.ToFileAtLevel(kubeLogFile, "warn")
 
 	clog.Debug(ctx, "configuration passed", "configuration", s.config)

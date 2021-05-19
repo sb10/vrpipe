@@ -877,11 +877,7 @@ func (s *opst) spawn(ctx context.Context, req *Requirements, flavor *cloud.Flavo
 	clog.Debug(ctx, "will spawn new server", "cmd", cmd)
 	tSpawn := time.Now()
 	server, err := s.provider.Spawn(ctx, requestedOS, osUser, flavor.ID, req.Disk, s.config.ServerKeepTime, false, usingQuotaCB)
-	// serverID := "failed"
-	// if server != nil {
-	// 	serverID = server.ID
-	// }
-	// logger = logger.New("server", serverID)
+
 	clog.Debug(ctx, "spawned server", "took", time.Since(tSpawn))
 
 	if err == nil && server != nil {
@@ -1105,7 +1101,6 @@ func (s *opst) runCmd(ctx context.Context, cmd string, req *Requirements, reserv
 				clog.Warn(ctx, "failed to send on reservedCh", "server", sid)
 			}
 
-			//logger = logger.New("server", sid)
 			clog.Debug(ctx, "picked server")
 			break
 		}

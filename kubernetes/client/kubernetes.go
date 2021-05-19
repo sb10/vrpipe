@@ -128,13 +128,6 @@ func (ac AuthConfig) ConfigPath() string {
 	return ac.KubeConfigPath
 }
 
-// // GetLogger returns the Logger if one is provided, otherwise provides a new one
-// func (ac AuthConfig) GetLogger() log15.Logger {
-// 	l := log15.New("clientlib")
-// 	l.SetHandler(log15.DiscardHandler())
-// 	return l
-// }
-
 func int32Ptr(i int32) *int32 { return &i }
 
 func boolTrue() *bool {

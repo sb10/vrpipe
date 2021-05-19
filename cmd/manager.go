@@ -584,7 +584,6 @@ func logStarted(s *jobqueue.ServerInfo, token []byte) {
 	// go back to just stderr so we don't log token to file (this doesn't affect
 	// server logging)
 	clog.ToDefaultAtLevel("info")
-	// appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
 	info("wr's web interface can be reached at https://%s:%s/?token=%s", s.Host, s.WebPort, string(token))
 
 	if setDomainIP {
@@ -620,21 +619,6 @@ func startJQ(ctx context.Context, postCreation []byte) {
 			warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
 		}
 	}
-
-	// serverLogger := log15.New()
-	// fh, err := log15.FileHandler(config.ManagerLogFile, log15.LogfmtFormat())
-	// if err != nil {
-	// 	warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
-	// } else {
-	// 	l15h.AddHandler(appLogger, fh)
-
-	// 	// have the server logger output to file, levelled with caller info
-	// 	logLevel := log15.LvlWarn
-	// 	if managerDebug {
-	// 		logLevel = log15.LvlDebug
-	// 	}
-	// 	serverLogger.SetHandler(log15.LvlFilterHandler(logLevel, l15h.CallerInfoHandler(fh)))
-	// }
 
 	// we will spawn runners, which means we need to know the path to ourselves
 	// in case we're not in the user's $PATH

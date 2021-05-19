@@ -240,6 +240,7 @@ func Which(exeName string) string {
 		if err != nil || !stat.IsDir() {
 			continue
 		}
+
 		exes, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -360,6 +361,7 @@ func FileMD5(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	defer LogClose(ctx, file, "fileMD5", "path", path)
 
 	h := md5.New() // #nosec not used for security purposes

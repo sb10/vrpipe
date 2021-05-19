@@ -269,14 +269,6 @@ func (c *Client) Disconnect() error {
 	return c.sock.Close()
 }
 
-// SetLogger sets the logger, if you want to get debug type messages when
-// running client methods (currently only Execute() tells you about connection
-// issues, letting you understand why it might not seem to be doing anything as
-// it tries to reconnect). By default, these messages are discarded.
-// func (c *Client) SetLogger(logger log15.Logger) {
-// 	c.Logger = logger
-// }
-
 // Ping tells you if your connection to the server is working, returning static
 // information about the server. If err is nil, it works. This is the only
 // command that interacts with the server that works if a blank or invalid

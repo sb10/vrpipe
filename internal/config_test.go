@@ -28,7 +28,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -72,8 +71,7 @@ func fileTestSetup(dir, mport, mweb1, mweb2 string) (string, string, error) {
 }
 
 func createFile(path string) (*os.File, error) {
-	_, err := os.Stat(path)
-	if err == nil {
+	if _, err := os.Stat(path); err == nil {
 		return nil, &FileExistsError{Path: path, Err: nil}
 	}
 
@@ -91,13 +89,11 @@ func writeStringToFile(filep *os.File, data string) {
 }
 
 func fileTestTeardown(path, path2 string) {
-	err := os.Remove(path)
-	if err != nil {
+	if err := os.Remove(path); err != nil {
 		fmt.Printf("\nfailed to delete %s: %s\n", path, err)
 	}
 
-	err = os.Remove(path2)
-	if err != nil {
+	if err := os.Remove(path2); err != nil {
 		fmt.Printf("\nfailed to delete %s: %s\n", path2, err)
 	}
 }
@@ -123,7 +119,7 @@ func checkErrorFromBuffer(buff *bytes.Buffer, subStr string) {
 
 func getTempHome(ctx context.Context) (string, func()) {
 	origHome := fsd.GetHome(ctx)
-	tempHome, err := ioutil.TempDir("", "tempHome")
+	tempHome, err := os.MkdirTemp("", "tempHome")
 	So(err, ShouldBeNil)
 	os.Setenv("HOME", tempHome)
 
@@ -210,7 +206,7 @@ func TestConfig(t *testing.T) {
 		pn := 1000
 
 		Convey("and a directory", func() {
-			tempHome, err := ioutil.TempDir("", "temp_home")
+			tempHome, err := os.MkdirTemp("", "temp_home")
 			if err != nil {
 				clog.Fatal(ctx, "err", err)
 			}
@@ -244,7 +240,7 @@ func TestConfig(t *testing.T) {
 
 		Convey("we can write dev and prod ports to config files in our home directory", func() {
 			origHome := fsd.GetHome(ctx)
-			tempHome, err := ioutil.TempDir("", "temp_home")
+			tempHome, err := os.MkdirTemp("", "temp_home")
 			if err != nil {
 				clog.Fatal(ctx, "err", err)
 			}
@@ -500,7 +496,7 @@ func TestConfig(t *testing.T) {
 		})
 
 		Convey("it can be overridden with a config file given its path", func() {
-			dir, err := ioutil.TempDir("", "wr_conf_test")
+			dir, err := os.MkdirTemp("", "wr_conf_test")
 			So(err, ShouldBeNil)
 			defer os.RemoveAll(dir)
 
@@ -531,7 +527,7 @@ func TestConfig(t *testing.T) {
 
 		Convey("these can be overridden with config files in WR_CONFIG_DIR", func() {
 			uid := 1000
-			dir, err := ioutil.TempDir("", "wr_conf_test")
+			dir, err := os.MkdirTemp("", "wr_conf_test")
 			So(err, ShouldBeNil)
 			defer os.RemoveAll(dir)
 
@@ -583,7 +579,7 @@ func TestConfig(t *testing.T) {
 				})
 
 				Convey("these can be overridden with config files in current dir", func() {
-					pwd, err := ioutil.TempDir("", "temp_pwd")
+					pwd, err := os.MkdirTemp("", "temp_pwd")
 					So(err, ShouldBeNil)
 					mport = "1434"
 					mweb1 = "1435"
@@ -610,27 +606,27 @@ func TestConfig(t *testing.T) {
 			ManagerSetDomainIP bool    `default:"false"`
 		}
 
-		old := &testConfig{}
-		old.ManagerUmask = 4
+		oldC := &testConfig{}
+		oldC.ManagerUmask = 4
 
-		new := &testConfig{}
-		So(new.ManagerUmask, ShouldEqual, 0)
+		newC := &testConfig{}
+		So(newC.ManagerUmask, ShouldEqual, 0)
 
-		v := reflect.ValueOf(*old)
+		v := reflect.ValueOf(*oldC)
 		typeOfC := v.Type()
 
-		adrFieldString := reflect.ValueOf(new).Elem().Field(0)
-		adrFieldBool := reflect.ValueOf(new).Elem().Field(1)
-		adrFieldInt := reflect.ValueOf(new).Elem().Field(2)
-		adrFieldFloat := reflect.ValueOf(new).Elem().Field(3)
+		adrFieldString := reflect.ValueOf(newC).Elem().Field(0)
+		adrFieldBool := reflect.ValueOf(newC).Elem().Field(1)
+		adrFieldInt := reflect.ValueOf(newC).Elem().Field(2)
+		adrFieldFloat := reflect.ValueOf(newC).Elem().Field(3)
 
 		setSourceOnChangeProp(typeOfC, adrFieldString, v, 0)
 		setSourceOnChangeProp(typeOfC, adrFieldBool, v, 1)
 		setSourceOnChangeProp(typeOfC, adrFieldInt, v, 2)
 		setSourceOnChangeProp(typeOfC, adrFieldFloat, v, 3)
 
-		So(new.ManagerUmask, ShouldEqual, 4)
-		So(new.ManagerHost, ShouldEqual, "")
+		So(newC.ManagerUmask, ShouldEqual, 4)
+		So(newC.ManagerHost, ShouldEqual, "")
 	})
 
 	Convey("It can get the default deployment", t, func() {
@@ -659,7 +655,7 @@ func TestConfig(t *testing.T) {
 			orgPWD, err := os.Getwd()
 			So(err, ShouldBeNil)
 
-			dir, err := ioutil.TempDir("", "wr_conf_test")
+			dir, err := os.MkdirTemp("", "wr_conf_test")
 			So(err, ShouldBeNil)
 			path := dir + "/jobqueue/server.go"
 			err = os.MkdirAll(path, 0777)
@@ -733,7 +729,7 @@ func TestConfig(t *testing.T) {
 		defer os.Unsetenv("WR_MANAGERUMASK")
 
 		uid := 1000
-		pwd, err := ioutil.TempDir("", "temp_wd")
+		pwd, err := os.MkdirTemp("", "temp_wd")
 		So(err, ShouldBeNil)
 		mport := "5434"
 		mweb1 := "5435"

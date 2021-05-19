@@ -247,15 +247,6 @@ func New(ctx context.Context, name string, config interface{}) (*Scheduler, erro
 		return nil, Error{name, "New", ErrBadScheduler}
 	}
 
-	// var l log15.Logger
-	// if len(logger) == 1 {
-	// 	l = logger[0].New()
-	// } else {
-	// 	l = log15.New()
-	// 	l.SetHandler(log15.DiscardHandler())
-	// }
-	// s.Logger = l
-
 	s.Name = name
 	s.limiter = make(map[string]int)
 	err := s.impl.initialize(ctx, config)

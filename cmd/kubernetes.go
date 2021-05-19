@@ -149,7 +149,6 @@ Authenticating against the cluster will be attempted, by default, with the file
 pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
-		// kubeLogger := setupLogging(kubeDebug)
 
 		// Read in post creation script
 		var postCreation []byte
