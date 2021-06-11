@@ -608,17 +608,22 @@ func startJQ(ctx context.Context, postCreation []byte) {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	}
 
-	// change the app logger to log to both STDERR and our configured log file;
+	// change the logger to log to both STDERR and our configured log file;
 	// we also create a new logger for internal use by the server later
-	if err := clog.ToFileAtLevel(config.ManagerLogFile, "warn"); err != nil {
+	clog.ToDefault()
+	logLevel := "warn"
+
+	if managerDebug {
+		logLevel = "debug"
+	}
+
+	fileHandler, err := clog.CreateFileHandlerAtLevel(config.ManagerLogFile, logLevel)
+
+	if err != nil {
 		warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
 	}
 
-	if managerDebug {
-		if err := clog.ToFileAtLevel(config.ManagerLogFile, "debug"); err != nil {
-			warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
-		}
-	}
+	clog.AddHandler(fileHandler)
 
 	// we will spawn runners, which means we need to know the path to ourselves
 	// in case we're not in the user's $PATH

@@ -1,4 +1,4 @@
-// Copyright © 2020 Genome Research Limited
+// Copyright © 2020, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.

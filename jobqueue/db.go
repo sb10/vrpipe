@@ -168,6 +168,7 @@ func initDB(ctx context.Context, dbFile string, dbBkFile string, deployment stri
 				Accessor: accessor,
 				Write:    true,
 			}
+			muxfys.SetLogHandler(clog.GetHandler())
 
 			cfg := &muxfys.Config{
 				Mount:   mnt,
