@@ -750,7 +750,8 @@ func TestOpenstack(t *testing.T) {
 					So(flavor.Disk, ShouldEqual, 8)
 					So(flavor.Cores, ShouldEqual, 1)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 1, 20, otherReqs, true, true, true}, "b")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 1, 20, otherReqs,
+						true, true, true}, "b")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2000") // we now ignore the 20GB disk requirement
 
@@ -759,53 +760,61 @@ func TestOpenstack(t *testing.T) {
 					So(flavor.ID, ShouldEqual, "2001")
 					So(flavor.RAM, ShouldEqual, 4096)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 2, 1, otherReqs, true, true, true}, "d")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 2, 1, otherReqs,
+						true, true, true}, "d")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2001")
 					So(flavor.RAM, ShouldEqual, 4096)
 					So(flavor.Disk, ShouldEqual, 12)
 					So(flavor.Cores, ShouldEqual, 2)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{5000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "e")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{5000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "e")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2002")
 					So(flavor.RAM, ShouldEqual, 16384)
 					So(flavor.Disk, ShouldEqual, 20)
 					So(flavor.Cores, ShouldEqual, 4)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{64000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "f")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{64000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "f")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2003")
 					So(flavor.RAM, ShouldEqual, 65536)
 					So(flavor.Disk, ShouldEqual, 20)
 					So(flavor.Cores, ShouldEqual, 8)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{66000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "g")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{66000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "g")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2004")
 					So(flavor.RAM, ShouldEqual, 122880)
 					So(flavor.Disk, ShouldEqual, 128)
 					So(flavor.Cores, ShouldEqual, 16)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{261000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "h")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{261000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "h")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2005")
 					So(flavor.RAM, ShouldEqual, 262144)
 					So(flavor.Disk, ShouldEqual, 128)
 					So(flavor.Cores, ShouldEqual, 52)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{263000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "i")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{263000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "i")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2006")
 					So(flavor.RAM, ShouldEqual, 496640)
 					So(flavor.Disk, ShouldEqual, 128)
 					So(flavor.Cores, ShouldEqual, 56)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 3, 1, otherReqs, true, true, true}, "j")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 3, 1, otherReqs,
+						true, true, true}, "j")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2002")
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 5, 1, otherReqs, true, true, true}, "k")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 5, 1, otherReqs,
+						true, true, true}, "k")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2003")
 				} else {
@@ -815,7 +824,8 @@ func TestOpenstack(t *testing.T) {
 					So(flavor.Disk, ShouldEqual, 15)
 					So(flavor.Cores, ShouldEqual, 1)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 1, 20, otherReqs, true, true, true}, "l")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 1, 20, otherReqs,
+						true, true, true}, "l")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2000")
 
@@ -823,28 +833,32 @@ func TestOpenstack(t *testing.T) {
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2000")
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 2, 1, otherReqs, true, true, true}, "n")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{100, 1 * time.Minute, 2, 1, otherReqs,
+						true, true, true}, "n")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2001")
 					So(flavor.RAM, ShouldEqual, 17200)
 					So(flavor.Disk, ShouldEqual, 31)
 					So(flavor.Cores, ShouldEqual, 2)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{30000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "o")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{30000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "o")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2002")
 					So(flavor.RAM, ShouldEqual, 34400)
 					So(flavor.Disk, ShouldEqual, 62)
 					So(flavor.Cores, ShouldEqual, 4)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{64000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "p")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{64000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "p")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2003")
 					So(flavor.RAM, ShouldEqual, 68800)
 					So(flavor.Disk, ShouldEqual, 125)
 					So(flavor.Cores, ShouldEqual, 8)
 
-					flavor, err = oss.determineFlavor(ctx, &Requirements{120000, 1 * time.Minute, 1, 1, otherReqs, true, true, true}, "q")
+					flavor, err = oss.determineFlavor(ctx, &Requirements{120000, 1 * time.Minute, 1, 1, otherReqs,
+						true, true, true}, "q")
 					So(err, ShouldBeNil)
 					So(flavor.ID, ShouldEqual, "2004")
 					So(flavor.RAM, ShouldEqual, 137600)
@@ -1155,7 +1169,8 @@ func TestOpenstack(t *testing.T) {
 
 				numCores := 5
 				oReqsm := make(map[string]string)
-				multiCoreFlavor, err := oss.determineFlavor(ctx, &Requirements{1024, 1 * time.Minute, float64(numCores), 0, oReqsm, true, true, true}, "u")
+				multiCoreFlavor, err := oss.determineFlavor(ctx, &Requirements{1024, 1 * time.Minute, float64(numCores), 0, oReqsm,
+					true, true, true}, "u")
 				if err == nil && multiCoreFlavor.Cores >= numCores {
 					oReqs := make(map[string]string)
 					oReqs["cloud_os_ram"] = strconv.Itoa(multiCoreFlavor.RAM)

@@ -29,7 +29,8 @@ import (
 	"github.com/VertebrateResequencing/wr/kubernetes/client"
 	kubescheduler "github.com/VertebrateResequencing/wr/kubernetes/scheduler"
 	"github.com/VertebrateResequencing/wr/queue"
-	"github.com/wtsi-ssg/wr/clog"
+	"github.com/inconshreveable/log15"
+	"github.com/sb10/l15h"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,6 +60,7 @@ type k8s struct {
 	es              bool // Does the cluster support ephemeral storage reporting?
 	esmutex         *sync.RWMutex
 	stopCh          chan struct{}
+	log15.Logger
 }
 
 var defaultScriptName = client.DefaultScriptName
@@ -164,11 +166,18 @@ func (c *ConfigKubernetes) GetServerKeepTime() time.Duration {
 func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	s.config = config.(*ConfigKubernetes)
 
+	var logger log15.Logger
+	s.Logger = logger.New("scheduler", "kubernetes")
+
 	kubeLogFile := filepath.Join(s.config.ManagerDir, kubeSchedulerLog)
+	fh, err := log15.FileHandler(kubeLogFile, log15.LogfmtFormat())
+	if err != nil {
+		return fmt.Errorf("wr kubernetes scheduler could not log to %s: %s", kubeLogFile, err)
+	}
 
-	clog.ToFileAtLevel(kubeLogFile, "warn")
+	l15h.AddHandler(s.Logger, fh)
 
-	clog.Debug(ctx, "configuration passed", "configuration", s.config)
+	s.Debug("configuration passed", "configuration", s.config)
 
 	// make queue
 	s.queue = queue.New(ctx, localPlace)
@@ -200,13 +209,13 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 		if string(s.config.PostCreationScript) != "" {
 			cmap, errc := s.libclient.CreateInitScriptConfigMap(string(s.config.PostCreationScript))
 			if errc != nil {
-				clog.Crit(ctx, "failed to create configmap from PostCreationScript")
+				s.Crit("failed to create configmap from PostCreationScript")
 				return errc
 			}
 			configMapName = cmap.ObjectMeta.Name
 			scriptName = defaultScriptName
 		} else {
-			clog.Crit(ctx, "a config map or post creation script must be provided.")
+			s.Crit("a config map or post creation script must be provided.")
 		}
 	}
 
@@ -217,10 +226,10 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	s.podAliveChan = make(chan *kubescheduler.PodAlive)
 
 	if s.msgCB == nil {
-		clog.Warn(ctx, "No message callback function set")
+		s.Warn("No message callback function set")
 	}
 	if s.badServerCB == nil {
-		clog.Warn(ctx, "No bad server callback function set")
+		s.Warn("No bad server callback function set")
 	}
 
 	// Prerequisites to start the controller
@@ -233,7 +242,7 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	// Initialise all internal clients on the provided namespace
 	err = s.libclient.Initialize(ctx, kubeClient, s.config.Namespace)
 	if err != nil {
-		clog.Crit(ctx, "failed to initialise the internal clients to namespace", "namespace", s.config.Namespace, "error", err)
+		s.Crit("failed to initialise the internal clients to namespace", "namespace", s.config.Namespace, "error", err)
 		return err
 	}
 
@@ -245,7 +254,7 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	})
 
 	// Rewrite config files.
-	files := s.rewriteConfigFiles(ctx, s.config.ConfigFiles)
+	files := s.rewriteConfigFiles(s.config.ConfigFiles)
 	files = append(files, client.FilePair{Src: s.config.LocalBinaryPath, Dest: s.config.TempMountPath + filepath.Base(s.config.LocalBinaryPath)})
 
 	// Initialise scheduler opts
@@ -259,21 +268,21 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	}
 
 	// Start listening for messages on call back channels
-	go s.notifyCallBack(ctx, s.callBackChan, s.badCallBackChan)
+	go s.notifyCallBack(s.callBackChan, s.badCallBackChan)
 
 	// Create the controller
 	controller := kubescheduler.NewController(kubeClient, restConfig, s.libclient, kubeInformerFactory, opts)
-	clog.Debug(ctx, "Controller contents", "contents", controller)
+	s.Debug("Controller contents", "contents", controller)
 
 	s.stopCh = make(chan struct{})
 
 	go kubeInformerFactory.Start(s.stopCh)
 
 	// Start the scheduling controller
-	clog.Debug(ctx, "Starting scheduling controller")
+	s.Debug("Starting scheduling controller")
 	go func() {
 		if err = controller.Run(ctx, 2, s.stopCh); err != nil {
-			clog.Error(ctx, "Error running controller", "error", err.Error())
+			s.Error("Error running controller", "error", err.Error())
 		}
 	}()
 
@@ -287,7 +296,7 @@ func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 // autoscaling?)
 // https://godoc.org/k8s.io/apimachinery/pkg/util/wait#ExponentialBackoff
 func (s *k8s) reqCheck(ctx context.Context, req *Requirements) error {
-	clog.Debug(ctx, "reqCheck called with requirements", "requirements", req)
+	s.Debug("reqCheck called with requirements", "requirements", req)
 
 	cores, ram, disk := s.generateResourceRequests(req)
 
@@ -300,24 +309,24 @@ func (s *k8s) reqCheck(ctx context.Context, req *Requirements) error {
 		CbChan: make(chan kubescheduler.Response),
 	}
 
-	clog.Debug(ctx, "Sending request to listener", "request", r)
+	s.Debug("Sending request to listener", "request", r)
 	go func() {
 		s.reqChan <- r
 	}()
 
-	clog.Debug(ctx, "Waiting on reqCheck to return")
+	s.Debug("Waiting on reqCheck to return")
 	resp := <-r.CbChan
 
 	s.esmutex.Lock()
 	defer s.esmutex.Unlock()
 
 	if resp.Error != nil {
-		clog.Error(ctx, "Requirements check received error", "error", resp.Error)
+		s.Error("Requirements check received error", "error", resp.Error)
 		s.es = resp.Ephemeral
 		return resp.Error
 	}
 
-	clog.Debug(ctx, "reqCheck returned ok")
+	s.Debug("reqCheck returned ok")
 	s.es = resp.Ephemeral
 
 	return resp.Error
@@ -325,7 +334,7 @@ func (s *k8s) reqCheck(ctx context.Context, req *Requirements) error {
 
 // setMessageCallBack sets the given callback function.
 func (s *k8s) setMessageCallBack(ctx context.Context, cb MessageCallBack) {
-	clog.Debug(ctx, "setMessageCallBack called")
+	s.Debug("setMessageCallBack called")
 	s.cbmutex.Lock()
 	defer s.cbmutex.Unlock()
 	s.msgCB = cb
@@ -333,7 +342,7 @@ func (s *k8s) setMessageCallBack(ctx context.Context, cb MessageCallBack) {
 
 // setBadServerCallBack sets the given callback function.
 func (s *k8s) setBadServerCallBack(ctx context.Context, cb BadServerCallBack) {
-	clog.Debug(ctx, "setBadServerCallBack called")
+	s.Debug("setBadServerCallBack called")
 	s.cbmutex.Lock()
 	defer s.cbmutex.Unlock()
 	s.badServerCB = cb
@@ -341,17 +350,17 @@ func (s *k8s) setBadServerCallBack(ctx context.Context, cb BadServerCallBack) {
 
 // The controller is passed a callback channel. notifyMessage receives on the
 // channel. If anything is received call s.msgCB(msg).
-func (s *k8s) notifyCallBack(ctx context.Context, callBackChan chan string, badCallBackChan chan *cloud.Server) {
-	clog.Debug(ctx, "notifyCallBack handler started")
+func (s *k8s) notifyCallBack(callBackChan chan string, badCallBackChan chan *cloud.Server) {
+	s.Debug("notifyCallBack handler started")
 	for {
 		select {
 		case msg := <-callBackChan:
-			clog.Debug(ctx, "Callback notification", "msg", msg)
+			s.Debug("Callback notification", "msg", msg)
 			if s.msgCB != nil {
 				go s.msgCB(msg)
 			}
 		case badServer := <-badCallBackChan:
-			clog.Debug(ctx, "Bad server callback notification", "name", badServer.Name, "problem", badServer.PermanentProblem())
+			s.Debug("Bad server callback notification", "name", badServer.Name, "problem", badServer.PermanentProblem())
 			if s.badServerCB != nil {
 				go s.badServerCB(badServer)
 			}
@@ -361,7 +370,7 @@ func (s *k8s) notifyCallBack(ctx context.Context, callBackChan chan string, badC
 
 // cleanup destroys the local queue and stops the scheduler controller.
 func (s *k8s) cleanup(ctx context.Context) {
-	clog.Debug(ctx, "cleanup() Called")
+	s.Debug("cleanup() Called")
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -370,7 +379,7 @@ func (s *k8s) cleanup(ctx context.Context) {
 	s.cleaned = true
 	err := s.queue.Destroy()
 	if err != nil {
-		clog.Warn(ctx, "cleanup queue destruction failed", "err", err)
+		s.Warn("cleanup queue destruction failed", "err", err)
 	}
 
 	// Stop the scheduler controller
@@ -385,7 +394,7 @@ func (s *k8s) cleanup(ctx context.Context) {
 // that pend fails. This should reduce overall load on the cluster when adding
 // lots of jobs at once.
 func (s *k8s) canCount(ctx context.Context, cmd string, req *Requirements, call string) int {
-	clog.Debug(ctx, "canCount Called, returning 100")
+	s.Debug("canCount Called, returning 100")
 	// 100 is  a big enough block for anyone...
 	return 100
 }
@@ -397,7 +406,7 @@ func (s *k8s) cant(ctx context.Context, desired int, cmd string, req *Requiremen
 // RunFunc calls spawn() and exits with an error = nil when pod has terminated
 // (Runner exited). Or an error if there was a problem.
 func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reservedCh chan bool, call string) error {
-	clog.Debug(ctx, "RunCmd Called", "cmd", cmd, "requirements", req)
+	s.Debug("RunCmd Called", "cmd", cmd, "requirements", req)
 	// The first 'argument' to cmd will be the absolute path to the manager's
 	// executable. Work out the local binary's name from localBinaryPath.
 
@@ -422,7 +431,7 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 	var containerImage string
 	if val, defined := req.Other["cloud_os"]; defined {
 		containerImage = val
-		clog.Debug(ctx, "setting container image", "container image", containerImage)
+		s.Debug("setting container image", "container image", containerImage)
 	} else {
 		containerImage = s.config.Image
 	}
@@ -443,7 +452,7 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 
 	//DEBUG: binaryArgs = []string{"tail", "-f", "/dev/null"}
 
-	clog.Debug(ctx, "Spawning pod with requirements", "requirements", resources)
+	s.Debug("Spawning pod with requirements", "requirements", resources)
 	pod, err := s.libclient.Spawn(ctx, containerImage,
 		s.config.TempMountPath,
 		configMountPath+"/"+scriptName,
@@ -453,14 +462,14 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 		resources)
 
 	if err != nil {
-		clog.Error(ctx, "error spawning runner pod", "err", err)
+		s.Error("error spawning runner pod", "err", err)
 		s.msgCB(fmt.Sprintf("unable to spawn a runner with requirements %s: %s", req.Stringify(), err))
 		reservedCh <- false
 		return err
 	}
 
 	reservedCh <- true
-	clog.Debug(ctx, "Spawn request succeeded", "pod", pod.ObjectMeta.Name)
+	s.Debug("Spawn request succeeded", "pod", pod.ObjectMeta.Name)
 
 	// We need to know when the pod we've created (the runner) terminates. There
 	// is a listener in the controller that will notify when a pod passed to it
@@ -468,7 +477,7 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 	// channel. The notification is the channel returning an error (or nil).
 
 	// Send the request to the listener.
-	clog.Debug(ctx, "Sending request to the podAliveChan", "pod", pod.ObjectMeta.Name)
+	s.Debug("Sending request to the podAliveChan", "pod", pod.ObjectMeta.Name)
 	errChan := make(chan error)
 	go func() {
 		req := &kubescheduler.PodAlive{
@@ -482,18 +491,18 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 	// Wait for the response, if there is an error (e.g CrashBackLoopoff)
 	// suggesting the post create script is throwing an error, return it here.
 	// Don't delete the pod if some error is thrown and debug is enabled.
-	clog.Debug(ctx, "Waiting on status of pod", "pod", pod.ObjectMeta.Name)
+	s.Debug("Waiting on status of pod", "pod", pod.ObjectMeta.Name)
 	err = <-errChan
 	if err != nil {
-		clog.Error(ctx, "error with pod", "pod", pod.ObjectMeta.Name, "err", err)
+		s.Error("error with pod", "pod", pod.ObjectMeta.Name, "err", err)
 		if s.config.Debug {
 			return err
 		}
 	}
 	// Delete terminated pod if no error thrown.
-	clog.Debug(ctx, "Deleting pod", "pod", pod.ObjectMeta.Name)
+	s.Debug("Deleting pod", "pod", pod.ObjectMeta.Name)
 	err = s.libclient.DestroyPod(ctx, pod.ObjectMeta.Name)
-	clog.Debug(ctx, "Returning at end of runCmd()")
+	s.Debug("Returning at end of runCmd()")
 
 	return err
 }
@@ -504,12 +513,12 @@ func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reserve
 //  are allowed, any path not starting '~/' is dropped as everything ultimately
 //  needs to go into TempMountPath as that's the volume that gets preserved
 //  across containers.
-func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []client.FilePair {
+func (s *k8s) rewriteConfigFiles(configFiles string) []client.FilePair {
 	// Get current user's home directory os.user.Current() was failing in a pod.
 	// https://github.com/mitchellh/go-homedir ?
 	hDir, herr := os.UserHomeDir()
 	if herr != nil {
-		clog.Warn(ctx, "could not find home dir", "err", herr)
+		s.Warn("could not find home dir", "err", herr)
 	}
 	filePairs := []client.FilePair{}
 	paths := []string{}
@@ -532,14 +541,14 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 			srcDest := strings.Split(path, ":")
 			// If there is no : separator, drop the path
 			if len(srcDest) == 1 {
-				clog.Warn(ctx, "Dropping path", "path", localPath, "error", err)
+				s.Warn("Dropping path", "path", localPath, "error", err)
 				continue
 			}
 			if len(srcDest) == 2 {
 				// the client.token is not generated when this runs, so if the
 				// file is client.token, ignore the fact it does not exist
 				if filepath.Base(srcDest[0]) == "client.token" {
-					clog.Debug(ctx, "Adding client token", "path", path)
+					s.Debug("Adding client token", "path", path)
 					pairSrc = append(pairSrc, srcDest[0])
 					pairDst = append(pairDst, srcDest[1])
 					continue
@@ -547,7 +556,7 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 					// Check the src exists.
 					_, errr := os.Stat(srcDest[0])
 					if errr != nil {
-						clog.Warn(ctx, "Dropping path", "path", path, "error", errr)
+						s.Warn("Dropping path", "path", path, "error", errr)
 						continue
 					}
 
@@ -557,7 +566,7 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 					continue
 				}
 			}
-			clog.Error(ctx, "Source destination pair malformed", "pair", path)
+			s.Error("Source destination pair malformed", "pair", path)
 		} else {
 			paths = append(paths, path)
 		}
@@ -568,7 +577,7 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 	// match $HOME on the spawned runner.
 
 	// Process single paths
-	dests := s.rewriteDests(ctx, paths)
+	dests := s.rewriteDests(paths)
 
 	// For all paths which the src check has passed create the dest path by
 	// rewriting ~/ to hDir.
@@ -586,7 +595,7 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 	}
 
 	// Process src:dest pairs
-	dests = s.rewriteDests(ctx, pairDst)
+	dests = s.rewriteDests(pairDst)
 
 	// For all paths which the src check has passed create the dest path by
 	// rewriting ~/ to hDir.
@@ -608,14 +617,14 @@ func (s *k8s) rewriteConfigFiles(ctx context.Context, configFiles string) []clie
 // remove the '~/' prefix as tar will create a ~/.. file. We don't want this as
 // the files will be lost in the initcontainers filesystem. Replace '~/' with
 // TempMountPath which we define as $HOME in the created pods.
-func (s *k8s) rewriteDests(ctx context.Context, paths []string) []string {
+func (s *k8s) rewriteDests(paths []string) []string {
 	dests := []string{}
 	for _, path := range paths {
 		if strings.HasPrefix(path, "~/") {
 			// Return the file path relative to '~/'
 			rel, err := filepath.Rel("~/", path)
 			if err != nil {
-				clog.Error(ctx, "Could not convert path to relative path.", "path", path)
+				s.Error("Could not convert path to relative path.", "path", path)
 			}
 			dir := filepath.Dir(rel)
 			// Trim prefix dir = strings.TrimPrefix(dir, "~") Add podBinDir as
@@ -623,7 +632,7 @@ func (s *k8s) rewriteDests(ctx context.Context, paths []string) []string {
 			dir = s.config.TempMountPath + dir + "/"
 			dests = append(dests, dir+filepath.Base(path))
 		} else {
-			clog.Warn(ctx, "File may be lost as it does not have prefix '~/'", "file", path)
+			s.Warn("File may be lost as it does not have prefix '~/'", "file", path)
 			dests = append(dests, path)
 		}
 	}

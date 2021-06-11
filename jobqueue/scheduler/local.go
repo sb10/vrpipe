@@ -321,6 +321,7 @@ func (s *local) schedule(ctx context.Context, cmd string, req *Requirements, pri
 				s.removeKey(ctx, key)
 				clog.Debug(ctx, "schedule removed cmd", "cmd", cmd)
 			}
+
 			if !s.checkNeeded(ctx, cmd, key, count, running) {
 				// bypass a pointless processQueue call
 				s.mutex.Unlock()
@@ -569,6 +570,7 @@ func (s *local) processQueue(ctx context.Context, reason string) error {
 				}
 			}
 		}
+
 		s.postProcessFunc(ctx)
 
 		s.mutex.Lock()
@@ -763,7 +765,8 @@ func (s *local) canCount(ctx context.Context, cmd string, req *Requirements, cal
 		if canCount2 < canCount {
 			canCount = canCount2
 			if canCount < 0 {
-				clog.Warn(ctx, "negative canCount", "can", canCount, "maxCores", s.maxCores, "cores", s.cores, "zeroCores", s.zeroCores, "reqCores", req.Cores)
+				clog.Warn(ctx, "negative canCount", "can", canCount, "maxCores", s.maxCores, "cores",
+					s.cores, "zeroCores", s.zeroCores, "reqCores", req.Cores)
 				canCount = 0
 			}
 		}
