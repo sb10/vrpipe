@@ -87,6 +87,7 @@ import (
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/gofrs/uuid"
+	"github.com/wtsi-ssg/wr/clog"
 	"github.com/wtsi-ssg/wr/fs/local"
 )
 
@@ -374,7 +375,7 @@ func New(ctx context.Context, name string, resourceName string, savePath string)
 		return nil, err
 	}
 
-	p.inCloud = p.impl.inCloud(ctx)
+	p.inCloud = p.impl.inCloud(clog.ContextWithCloudType(ctx, "openstack"))
 	return p, nil
 }
 
@@ -415,7 +416,7 @@ func (p *Provider) Deploy(ctx context.Context, config *DeployConfig) error {
 	// impl.deploy should overwrite any existing values in p.resources with
 	// updated values, but should leave other things - such as an existing
 	// PrivateKey when we have not just made a new one - alone
-	err := p.impl.deploy(ctx, p.resources, config.RequiredPorts, config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
+	err := p.impl.deploy(clog.ContextWithCloudType(ctx, "openstack"), p.resources, config.RequiredPorts, config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
 	if err != nil {
 		return err
 	}
@@ -478,7 +479,7 @@ func (p *Provider) InCloud() bool {
 // GetQuota returns details of the maximum resources the user can request, and
 // the current resources used.
 func (p *Provider) GetQuota(ctx context.Context) (*Quota, error) {
-	return p.impl.getQuota(ctx)
+	return p.impl.getQuota(clog.ContextWithCloudType(ctx, "openstack"))
 }
 
 // CheapestServerFlavor returns details of the smallest (cheapest) server
@@ -526,7 +527,7 @@ func (p *Provider) pickCheapestFlavorFromSubset(ctx context.Context, cores, ramM
 	// and cpus that meet our minimums, and also matches the regex
 	var fr *Flavor
 
-	for _, f := range p.impl.flavors(ctx) {
+	for _, f := range p.impl.flavors(clog.ContextWithCloudType(ctx, "openstack")) {
 		if regexp != nil && !regexp.MatchString(f.Name) {
 			continue
 		}
@@ -614,7 +615,7 @@ func (p *Provider) CheapestServerFlavors(ctx context.Context, cores, ramMB int,
 // GetServerFlavor returns the flavor with the given ID or name. If no flavor
 // exactly matches you will get an error matching ErrBadFlavor.
 func (p *Provider) GetServerFlavor(ctx context.Context, idOrName string) (*Flavor, error) {
-	flavors := p.impl.flavors(ctx)
+	flavors := p.impl.flavors(clog.ContextWithCloudType(ctx, "openstack"))
 	fr, existed := flavors[idOrName]
 
 	if !existed {
@@ -670,7 +671,7 @@ type SpawnUsingQuotaCallback func()
 // anything.
 func (p *Provider) Spawn(ctx context.Context, os string, osUser string, flavorID string,
 	diskGB int, ttd time.Duration, externalIP bool, usingQuotaCB ...SpawnUsingQuotaCallback) (*Server, error) {
-	f, found := p.impl.flavors(ctx)[flavorID]
+	f, found := p.impl.flavors(clog.ContextWithCloudType(ctx, "openstack"))[flavorID]
 	if !found {
 		return nil, Error{"cloud", "Spawn", ErrBadFlavor}
 	}
@@ -684,7 +685,7 @@ func (p *Provider) Spawn(ctx context.Context, os string, osUser string, flavorID
 		}
 	}()
 
-	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(ctx, p.resources, os,
+	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(clog.ContextWithCloudType(ctx, "openstack"), p.resources, os,
 		flavorID, diskGB, externalIP, usingQuota)
 
 	if err != nil {
@@ -784,7 +785,7 @@ func (p *Provider) DestroyServer(ctx context.Context, serverID string) error {
 	delete(p.resources.Servers, serverID)
 	p.Unlock()
 
-	return p.saveResources(ctx)
+	return p.saveResources(clog.ContextWithCloudType(ctx, "openstack"))
 }
 
 // Servers returns a mapping of serverID => *Server for all servers that were
@@ -872,7 +873,7 @@ func (p *Provider) PrivateKey() string {
 func (p *Provider) TearDown(ctx context.Context) error {
 	p.RLock()
 	defer p.RUnlock()
-	err := p.impl.tearDown(ctx, p.resources)
+	err := p.impl.tearDown(clog.ContextWithCloudType(ctx, "openstack"), p.resources)
 	if err != nil {
 		return err
 	}

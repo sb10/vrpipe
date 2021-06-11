@@ -178,6 +178,7 @@ func NewServer(username, ip, key string) *Server {
 // server (as the user supplied to Spawn()) once it is ready, and it will
 // complete before this function returns; empty slice means do nothing.
 func (s *Server) WaitUntilReady(ctx context.Context, files string, postCreationScript []byte) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	// wait for ssh to come up
 	_, _, err := s.SSHClient(ctx)
 	if err != nil {
@@ -292,6 +293,7 @@ func (s *Server) Matches(os string, script []byte, configFiles string, flavor *F
 // there was enough space. Returns true if there was enough space and the
 // allocation occurred.
 func (s *Server) Allocate(ctx context.Context, cores float64, ramMB, diskGB int) bool {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.checkSpace(cores, ramMB, diskGB) == 0 {
@@ -331,6 +333,7 @@ func (s *Server) Used() bool {
 
 // Release records that the given resources have now been freed.
 func (s *Server) Release(ctx context.Context, cores float64, ramMB, diskGB int) {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if cores == 0 {
@@ -621,6 +624,7 @@ func sshDial(ctx context.Context, addr string, sshConfig *ssh.ClientConfig) (*ss
 // from, so that when you can call CloseSSHSession() when you're done with the
 // returned session.
 func (s *Server) SSHSession(ctx context.Context) (*ssh.Session, int, error) {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	sshClient, clientIndex, err := s.SSHClient(ctx)
 	if err != nil {
 		clog.Debug(ctx, "server ssh could not be established", "err", err)
@@ -678,6 +682,7 @@ func (s *Server) SSHSession(ctx context.Context) (*ssh.Session, int, error) {
 // retrieved from SSHSession()) was marked as bad, it will now be marked as
 // good, on the assumption there is now "space" for a new session.
 func (s *Server) CloseSSHSession(ctx context.Context, session *ssh.Session, clientIndex int) {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	err := session.Close()
 	s.closeWarning(ctx, err)
 
@@ -732,6 +737,7 @@ func (c *threadSafeWriteCloser) Close() error {
 // RunCmd runs the given command on the server, optionally in the background.
 // You get the command's STDOUT and STDERR as strings.
 func (s *Server) RunCmd(ctx context.Context, cmd string, background bool) (stdout, stderr string, err error) {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	// create a session
 	session, clientIndex, err := s.SSHSession(ctx)
 	if err != nil {
@@ -809,6 +815,7 @@ func (s *Server) RunCmd(ctx context.Context, cmd string, background bool) (stdou
 
 // UploadFile uploads a local file to the given location on the server.
 func (s *Server) UploadFile(ctx context.Context, source string, dest string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	sshClient, _, err := s.SSHClient(ctx)
 	if err != nil {
 		return err
@@ -860,6 +867,7 @@ func (s *Server) UploadFile(ctx context.Context, source string, dest string) err
 //
 // NB: currently only works if the server supports the command 'pwd'.
 func (s *Server) CopyOver(ctx context.Context, files string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	for _, path := range strings.Split(files, ",") {
 		split := strings.Split(path, ":")
 		var localPath, remotePath string
@@ -915,6 +923,7 @@ func (s *Server) CopyOver(ctx context.Context, files string) error {
 // HomeDir gets the absolute path to the server's home directory. Depends on
 // 'pwd' command existing on the server.
 func (s *Server) HomeDir(ctx context.Context) (string, error) {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.hmutex.Lock()
 	defer s.hmutex.Unlock()
 	if s.homeDir != "" {
@@ -931,6 +940,7 @@ func (s *Server) HomeDir(ctx context.Context) (string, error) {
 
 // CreateFile creates a new file with the given content on the server.
 func (s *Server) CreateFile(ctx context.Context, content string, dest string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	sshClient, _, err := s.SSHClient(ctx)
 	if err != nil {
 		return err
@@ -963,6 +973,7 @@ func (s *Server) CreateFile(ctx context.Context, content string, dest string) er
 // DownloadFile downloads a file from the server and stores it locally. The
 // directory for your local file must already exist.
 func (s *Server) DownloadFile(ctx context.Context, source string, dest string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	sshClient, _, err := s.SSHClient(ctx)
 	if err != nil {
 		return err
@@ -1000,6 +1011,7 @@ func (s *Server) DownloadFile(ctx context.Context, source string, dest string) e
 // MkDir creates a directory (and it's parents as necessary) on the server.
 // Requires sudo.
 func (s *Server) MkDir(ctx context.Context, dir string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	if dir == "." {
 		return nil
 	}
@@ -1113,6 +1125,7 @@ func (s *Server) CreateSharedDisk() error {
 // apt-get to install nfs-common on the server first, so probably only
 // compatible with Ubuntu. Requires sudo.
 func (s *Server) MountSharedDisk(ctx context.Context, nfsServerIP string) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.csmutex.Lock()
 	defer s.csmutex.Unlock()
 	if s.createdShare {
@@ -1207,6 +1220,7 @@ func (s *Server) PermanentProblem() string {
 
 // Destroy immediately destroys the server.
 func (s *Server) Destroy(ctx context.Context) error {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.destroyed {
@@ -1292,6 +1306,7 @@ func (s *Server) Destroyed() bool {
 // will double check the server to make sure it can be ssh'd to. If the server
 // doesn't exist, it will be removed from the provider's resources file.
 func (s *Server) Alive(ctx context.Context, checkSSH ...bool) bool {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	s.mutex.Lock()
 	if s.destroyed || s.toBeDestroyed {
 		s.mutex.Unlock()
@@ -1326,6 +1341,7 @@ func (s *Server) Alive(ctx context.Context, checkSSH ...bool) bool {
 // because this indicates you're using the wrong resource file for these
 // credentials.
 func (s *Server) Known(ctx context.Context) bool {
+	ctx = clog.ContextWithServerID(ctx, s.ID)
 	known, err := s.provider.ServerIsKnown(s.ID)
 	if err != nil {
 		clog.Warn(ctx, "could not check if the server is known about", "err", err)

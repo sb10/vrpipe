@@ -520,6 +520,7 @@ func (c *Client) ReserveScheduled(timeout time.Duration, schedulerGroup string) 
 // immediately return an error. NB: the peak RAM tracking assumes we are running
 // on a modern linux system with /proc/*/smaps.
 func (c *Client) Execute(ctx context.Context, job *Job, shell string) error {
+	ctx = clog.ContextWithJobKey(ctx, job.Key())
 	// quickly check upfront that we Reserve()d the job; this isn't required
 	// for other methods since the server does this check and returns an error,
 	// but in this case we want to avoid starting to execute the command before

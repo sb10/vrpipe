@@ -176,6 +176,7 @@ type job struct {
 // initialize finds out about the local machine. Compatible with amd64 archs
 // only!
 func (s *local) initialize(ctx context.Context, config interface{}) error {
+	ctx = clog.ContextWithSchedulerType(ctx, "local")
 	s.config = config.(*ConfigLocal)
 	s.maxCores = runtime.NumCPU()
 	if s.config.MaxCores > 0 && s.config.MaxCores < s.maxCores {
