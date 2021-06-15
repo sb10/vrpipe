@@ -175,7 +175,7 @@ func Connect(addr, caFile, certDomain string, token []byte, timeout time.Duratio
 		return nil, err
 	}
 	if time.Now().After(expiry) {
-		return nil, internal.CertError{Type: internal.ErrExpiredCert, Path: caFile}
+		return nil, &internal.CertError{Type: internal.ErrCertExpired, Path: caFile}
 	}
 
 	sock, err := req.NewSocket()

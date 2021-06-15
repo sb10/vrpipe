@@ -505,6 +505,7 @@ func (p *openstackp) deploy(ctx context.Context, resources *Resources, requiredP
 	// don't create any more resources if we're already running in OpenStack
 	var mainNetworkUUID string
 	var otherNetworkUUIDs []string
+
 	if p.inCloud(ctx) {
 		// work out our network uuid, needed for spawning later
 		for networkName := range p.ownServer.Addresses {

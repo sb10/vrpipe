@@ -373,9 +373,11 @@ down will be lost.`,
 			info("wr manager running on port %s is drained: there were no jobs still running, so the manger should stop right away.", config.ManagerPort)
 			deleteToken()
 		} else if numLeft == 1 {
-			info("wr manager running on port %s is now draining; there is a job still running, and it should %s", config.ManagerPort, completeMsg)
+			info("wr manager running on port %s is now draining; there is a job still running, and it should %s",
+				config.ManagerPort, completeMsg)
 		} else {
-			info("wr manager running on port %s is now draining; there are %d jobs still running, and they should %s", config.ManagerPort, numLeft, completeMsg)
+			info("wr manager running on port %s is now draining; there are %d jobs still running, and they should %s",
+				config.ManagerPort, numLeft, completeMsg)
 		}
 
 		err = jq.Disconnect()
@@ -611,6 +613,7 @@ func startJQ(ctx context.Context, postCreation []byte) {
 	// change the logger to log to both STDERR and our configured log file;
 	// we also create a new logger for internal use by the server later
 	clog.ToDefault()
+
 	logLevel := "warn"
 
 	if managerDebug {

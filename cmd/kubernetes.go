@@ -21,6 +21,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -212,7 +213,8 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 		// don't have any, generate them now
 		err := internal.CheckCerts(config.ManagerCertFile, config.ManagerKeyFile)
 		if err != nil {
-			err = internal.GenerateCerts(config.ManagerCAFile, config.ManagerCertFile, config.ManagerKeyFile, config.ManagerCertDomain)
+			err = internal.GenerateCerts(config.ManagerCAFile, config.ManagerCertFile, config.ManagerKeyFile,
+				config.ManagerCertDomain, 2048, 2048, crand.Reader, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 			if err != nil {
 				die("could not generate certs: %s", err)
 			}
@@ -385,7 +387,7 @@ pointed to by the $KUBECONFIG variable, else ~/.kube/config.`,
 
 			// Set up logging to file
 			kubeLogFile := filepath.Join(config.ManagerDir, kubeLogFileName)
-			if err := clog.ToFileAtLevel(kubeLogFile, "warn"); err != nil {
+			if err = clog.ToFileAtLevel(kubeLogFile, "warn"); err != nil {
 				warn("wr manager could not log to %s: %s", kubeLogFile, err)
 			}
 

@@ -20,6 +20,7 @@ package deployment_test
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/gob"
 	"fmt"
 	"math/rand"
@@ -195,7 +196,7 @@ func TestDeploy(t *testing.T) {
 		certFile := dir + "/cert.pem"
 		keyFile := dir + "/key.pem"
 		wrDir := "/wr-tmp/.wr_production/"
-		err = internal.GenerateCerts(caFile, certFile, keyFile, "localhost")
+		err = internal.GenerateCerts(caFile, certFile, keyFile, "localhost", 2048, 2048, crand.Reader, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 		if err != nil {
 			t.Errorf("failed to generate certificates: %s", err)
 		}

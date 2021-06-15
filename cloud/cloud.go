@@ -416,7 +416,8 @@ func (p *Provider) Deploy(ctx context.Context, config *DeployConfig) error {
 	// impl.deploy should overwrite any existing values in p.resources with
 	// updated values, but should leave other things - such as an existing
 	// PrivateKey when we have not just made a new one - alone
-	err := p.impl.deploy(clog.ContextWithCloudType(ctx, "openstack"), p.resources, config.RequiredPorts, config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
+	err := p.impl.deploy(clog.ContextWithCloudType(ctx, "openstack"), p.resources, config.RequiredPorts,
+		config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
 	if err != nil {
 		return err
 	}
@@ -685,8 +686,8 @@ func (p *Provider) Spawn(ctx context.Context, os string, osUser string, flavorID
 		}
 	}()
 
-	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(clog.ContextWithCloudType(ctx, "openstack"), p.resources, os,
-		flavorID, diskGB, externalIP, usingQuota)
+	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(clog.ContextWithCloudType(ctx, "openstack"),
+		p.resources, os, flavorID, diskGB, externalIP, usingQuota)
 
 	if err != nil {
 		return nil, err

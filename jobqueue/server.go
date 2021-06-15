@@ -22,6 +22,7 @@ package jobqueue
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -510,7 +511,7 @@ func Serve(ctx context.Context, config ServerConfig) (s *Server, msg string, tok
 	var certMsg string
 	if err != nil {
 		// if not, generate our own
-		err = internal.GenerateCerts(caFile, certFile, keyFile, certDomain)
+		err = internal.GenerateCerts(caFile, certFile, keyFile, certDomain, 2048, 2048, crand.Reader, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 		if err != nil {
 			serverLogger.Error("GenerateCerts failed", "err", err)
 			return s, msg, token, err
@@ -579,14 +580,14 @@ func Serve(ctx context.Context, config ServerConfig) (s *Server, msg string, tok
 		return s, msg, token, err
 	}
 	if time.Now().After(expiry) {
-		return s, msg, token, internal.CertError{Type: internal.ErrExpiredCert, Path: caFile}
+		return s, msg, token, &internal.CertError{Type: internal.ErrCertExpired, Path: caFile}
 	}
 	expiry2, err := internal.CertExpiry(certFile)
 	if err != nil {
 		return s, msg, token, err
 	}
 	if time.Now().After(expiry2) {
-		return s, msg, token, internal.CertError{Type: internal.ErrExpiredCert, Path: certFile}
+		return s, msg, token, &internal.CertError{Type: internal.ErrCertExpired, Path: certFile}
 	}
 	if expiry2.Before(expiry) {
 		expiry = expiry2

@@ -477,6 +477,7 @@ func (s *Server) createSSHClientConfig(ctx context.Context) error {
 		if s.provider != nil {
 			path = s.provider.savePath
 		}
+
 		clog.Error(ctx, "failed to parse private key", "path", path, "err", err)
 
 		return err
