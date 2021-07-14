@@ -48,11 +48,11 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/cloud"
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/dgryski/go-farm"
-	"github.com/inconshreveable/log15"
 )
 
 const (
@@ -184,18 +184,18 @@ type Host interface {
 // scheduleri interface must be satisfied to add support for a particular job
 // scheduler.
 type scheduleri interface {
-	initialize(config interface{}, logger log15.Logger) error                // do any initial set up to be able to use the job scheduler
-	schedule(cmd string, req *Requirements, priority uint8, count int) error // achieve the aims of Schedule()
-	scheduled(cmd string) (int, error)                                       // achieve the aims of Scheduled()
-	recover(cmd string, req *Requirements, host *RecoveredHostDetails) error // achieve the aims of Recover()
-	busy() bool                                                              // achieve the aims of Busy()
-	reserveTimeout(req *Requirements) int                                    // achieve the aims of ReserveTimeout()
-	maxQueueTime(req *Requirements) time.Duration                            // achieve the aims of MaxQueueTime(), return 0 for infinite queue time
-	hostToID(host string) string                                             // achieve the aims of HostToID()
-	getHost(host string) (Host, bool)                                        // get a Host that can be used to run commands over ssh on the given host, return false boolean if not such host exists
-	setMessageCallBack(MessageCallBack)                                      // achieve the aims of SetMessageCallBack()
-	setBadServerCallBack(BadServerCallBack)                                  // achieve the aims of SetBadServerCallBack()
-	cleanup()                                                                // do any clean up once you've finished using the job scheduler
+	initialize(ctx context.Context, config interface{}) error                                     // do any initial set up to be able to use the job scheduler
+	schedule(ctx context.Context, cmd string, req *Requirements, priority uint8, count int) error // achieve the aims of Schedule()
+	scheduled(ctx context.Context, cmd string) (int, error)                                       // achieve the aims of Scheduled()
+	recover(ctx context.Context, cmd string, req *Requirements, host *RecoveredHostDetails) error // achieve the aims of Recover()
+	busy(ctx context.Context) bool                                                                // achieve the aims of Busy()
+	reserveTimeout(ctx context.Context, req *Requirements) int                                    // achieve the aims of ReserveTimeout()
+	maxQueueTime(req *Requirements) time.Duration                                                 // achieve the aims of MaxQueueTime(), return 0 for infinite queue time
+	hostToID(host string) string                                                                  // achieve the aims of HostToID()
+	getHost(host string) (Host, bool)                                                             // get a Host that can be used to run commands over ssh on the given host, return false boolean if not such host exists
+	setMessageCallBack(ctx context.Context, cb MessageCallBack)                                   // achieve the aims of SetMessageCallBack()
+	setBadServerCallBack(ctx context.Context, cb BadServerCallBack)                               // achieve the aims of SetBadServerCallBack()
+	cleanup(ctx context.Context)                                                                  // do any clean up once you've finished using the job scheduler
 }
 
 // CloudConfig interface could be satisfied by the config option taken by cloud
@@ -222,7 +222,6 @@ type Scheduler struct {
 	Name    string
 	limiter map[string]int
 	sync.Mutex
-	log15.Logger
 }
 
 // New creates a new Scheduler to interact with the given job scheduler.
@@ -233,7 +232,7 @@ type Scheduler struct {
 // Providing a logger allows for debug messages to be logged somewhere, along
 // with any "harmless" or unreturnable errors. If not supplied, we use a default
 // logger that discards all log messages.
-func New(name string, config interface{}, logger ...log15.Logger) (*Scheduler, error) {
+func New(ctx context.Context, name string, config interface{}) (*Scheduler, error) {
 	var s *Scheduler
 	switch name {
 	case "lsf":
@@ -248,34 +247,30 @@ func New(name string, config interface{}, logger ...log15.Logger) (*Scheduler, e
 		return nil, Error{name, "New", ErrBadScheduler}
 	}
 
-	var l log15.Logger
-	if len(logger) == 1 {
-		l = logger[0].New()
-	} else {
-		l = log15.New()
-		l.SetHandler(log15.DiscardHandler())
-	}
-	s.Logger = l
-
 	s.Name = name
 	s.limiter = make(map[string]int)
-	err := s.impl.initialize(config, l)
+	err := s.impl.initialize(s.typeContext(ctx), config)
 
 	return s, err
+}
+
+// typeContext returns a context based on the scheduler type.
+func (s *Scheduler) typeContext(ctx context.Context) context.Context {
+	return clog.ContextWithSchedulerType(ctx, s.Name)
 }
 
 // SetMessageCallBack sets the function that will be called when a scheduler has
 // some message that could be informative to end users wondering why something
 // is not getting scheduled. The message typically describes an error condition.
-func (s *Scheduler) SetMessageCallBack(cb MessageCallBack) {
-	s.impl.setMessageCallBack(cb)
+func (s *Scheduler) SetMessageCallBack(ctx context.Context, cb MessageCallBack) {
+	s.impl.setMessageCallBack(s.typeContext(ctx), cb)
 }
 
 // SetBadServerCallBack sets the function that will be called when a cloud
 // scheduler discovers that one of the servers it spawned seems to no longer be
 // functional or reachable. Only relevant for cloud schedulers.
-func (s *Scheduler) SetBadServerCallBack(cb BadServerCallBack) {
-	s.impl.setBadServerCallBack(cb)
+func (s *Scheduler) SetBadServerCallBack(ctx context.Context, cb BadServerCallBack) {
+	s.impl.setBadServerCallBack(s.typeContext(ctx), cb)
 }
 
 // Schedule gets your cmd scheduled in the job scheduler. You give it a command
@@ -296,7 +291,7 @@ func (s *Scheduler) SetBadServerCallBack(cb BadServerCallBack) {
 // and will eventually run unless you call Schedule() again with the same
 // command and a lower count. NB: there is no guarantee that the jobs run
 // successfully, and no feedback on their success or failure is given.
-func (s *Scheduler) Schedule(cmd string, req *Requirements, priority uint8, count int) error {
+func (s *Scheduler) Schedule(ctx context.Context, cmd string, req *Requirements, priority uint8, count int) error {
 	// Schedule may get called many times in different go routines, eg. a
 	// succession of calls with the same cmd and req but decrementing count.
 	// Here we arrange that impl.schedule is only called once at a time per
@@ -312,16 +307,16 @@ func (s *Scheduler) Schedule(cmd string, req *Requirements, priority uint8, coun
 	s.limiter[cmd] = count
 	s.Unlock()
 
-	err := s.impl.schedule(cmd, req.Clone(), priority, count)
+	err := s.impl.schedule(s.typeContext(ctx), cmd, req.Clone(), priority, count)
 
 	s.Lock()
 	if newcount, limited := s.limiter[cmd]; limited {
 		if newcount != count {
 			go func() {
-				defer internal.LogPanic(s.Logger, "schedule recall", true)
-				errf := s.Schedule(cmd, req, priority, newcount)
+				defer internal.LogPanic(ctx, "schedule recall", true)
+				errf := s.Schedule(ctx, cmd, req, priority, newcount)
 				if errf != nil {
-					s.Error("schedule recall", "err", errf)
+					clog.Error(ctx, "schedule recall", "err", errf)
 				}
 			}()
 		}
@@ -334,8 +329,8 @@ func (s *Scheduler) Schedule(cmd string, req *Requirements, priority uint8, coun
 
 // Scheduled tells you how many of the given cmd are currently scheduled in the
 // scheduler.
-func (s *Scheduler) Scheduled(cmd string) (int, error) {
-	return s.impl.scheduled(cmd)
+func (s *Scheduler) Scheduled(ctx context.Context, cmd string) (int, error) {
+	return s.impl.scheduled(s.typeContext(ctx), cmd)
 }
 
 // Recover is used if you had Scheduled some cmds, then you crashed, and now
@@ -347,22 +342,22 @@ func (s *Scheduler) Scheduled(cmd string) (int, error) {
 //
 // The cmd and req ought to exactly match those previously supplied to
 // Schedule() before your crash.
-func (s *Scheduler) Recover(cmd string, req *Requirements, host *RecoveredHostDetails) error {
-	return s.impl.recover(cmd, req, host)
+func (s *Scheduler) Recover(ctx context.Context, cmd string, req *Requirements, host *RecoveredHostDetails) error {
+	return s.impl.recover(s.typeContext(ctx), cmd, req, host)
 }
 
 // Busy reports true if there are any Schedule()d cmds still in the job
 // scheduler's system. This is useful when testing and other situations where
 // you want to avoid shutting down the server while there are still clients
 // running/ about to run.
-func (s *Scheduler) Busy() bool {
-	return s.impl.busy()
+func (s *Scheduler) Busy(ctx context.Context) bool {
+	return s.impl.busy(s.typeContext(ctx))
 }
 
 // ReserveTimeout returns the number of seconds that runners spawned in this
 // scheduler should wait for new jobs to appear in the manager's queue.
-func (s *Scheduler) ReserveTimeout(req *Requirements) int {
-	return s.impl.reserveTimeout(req)
+func (s *Scheduler) ReserveTimeout(ctx context.Context, req *Requirements) int {
+	return s.impl.reserveTimeout(s.typeContext(ctx), req)
 }
 
 // MaxQueueTime returns the maximum amount of time that jobs with the given
@@ -407,8 +402,8 @@ func (s *Scheduler) ProcessNotRunngingOnHost(ctx context.Context, pid int, hostN
 
 // Cleanup means you've finished using a scheduler and it can delete any
 // remaining jobs in its system and clean up any other used resources.
-func (s *Scheduler) Cleanup() {
-	s.impl.cleanup()
+func (s *Scheduler) Cleanup(ctx context.Context) {
+	s.impl.cleanup(s.typeContext(ctx))
 }
 
 // jobName could be useful to a scheduleri implementer if it needs a constant-

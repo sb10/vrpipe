@@ -1,4 +1,4 @@
-// Copyright © 2019 Genome Research Limited
+// Copyright © 2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -90,6 +91,7 @@ be silently ignored.
 Because modifying a command may change its internal id, a mapping of old to
 new internal ids is printed.`,
 	Run: func(cobraCmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		// check the command line options
 		if cmdAll && cmdIDStatus != "" {
 			die("-a and -i are mutually exclusive")
@@ -124,7 +126,7 @@ new internal ids is printed.`,
 		}()
 
 		// get the job(s) user wishes to modify
-		jobs := getJobs(jq, jobqueue.JobStateDeletable, cmdAll, 0, false, false)
+		jobs := getJobs(ctx, jq, jobqueue.JobStateDeletable, cmdAll, 0, false, false)
 
 		if len(jobs) == 0 {
 			die("No matching jobs found")

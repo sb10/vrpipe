@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -20,6 +20,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -320,6 +321,7 @@ this manager session) job id, and turns on bsub emulation, which means that if
 your Cmd calls bsub, it will instead result in a command being added to wr. The
 new job will have this job's mount and cloud_* options.`,
 	Run: func(combraCmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		// check the command line options
 		if cmdFile == "" {
 			die("--file is required")
@@ -335,7 +337,7 @@ new job will have this job's mount and cloud_* options.`,
 			}
 		}()
 
-		jobs, isLocal, defaultedRepG := parseCmdFile(jq, combraCmd.Flags().Changed("disk"))
+		jobs, isLocal, defaultedRepG := parseCmdFile(ctx, jq, combraCmd.Flags().Changed("disk"))
 
 		var envVars []string
 		if isLocal {
@@ -440,7 +442,7 @@ func groupsToDeps(groups string) (deps jobqueue.Dependencies) {
 // defaults specified in other command line args. Returns job slice, bool for if
 // the manager is on the same host as us, and bool for if any job defaulted to
 // the default repgrp.
-func parseCmdFile(jq *jobqueue.Client, diskSet bool) ([]*jobqueue.Job, bool, bool) {
+func parseCmdFile(ctx context.Context, jq *jobqueue.Client, diskSet bool) ([]*jobqueue.Job, bool, bool) {
 	var isLocal bool
 	currentIP, errc := internal.CurrentIP("")
 	if errc != nil {
@@ -573,7 +575,7 @@ func parseCmdFile(jq *jobqueue.Client, diskSet bool) ([]*jobqueue.Job, bool, boo
 		if err != nil {
 			die("could not open file '%s': %s", cmdFile, err)
 		}
-		defer internal.LogClose(appLogger, reader.(*os.File), "cmds file", "path", cmdFile)
+		defer internal.LogClose(ctx, reader.(*os.File), "cmds file", "path", cmdFile)
 	}
 
 	// we'll default to pwd if the manager is on the same host as us, or if

@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package scheduler_test
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -56,9 +57,10 @@ const minMajorForEphemeralStorage = 1
 const minMinorForEphemeralStorage = 10
 
 func init() {
+	ctx := context.Background()
 	lc = &client.Kubernetesp{}
 
-	clientset, restConfig, autherr = lc.Authenticate(client.AuthConfig{})
+	clientset, restConfig, autherr = lc.Authenticate(ctx, client.AuthConfig{})
 	if autherr != nil {
 		skip = true
 		return
@@ -93,7 +95,7 @@ func init() {
 		return
 	}
 
-	autherr = lc.Initialize(clientset, testingNamespace)
+	autherr = lc.Initialize(ctx, clientset, testingNamespace)
 	if autherr != nil {
 		fmt.Printf("Failed initialise clients: %s", autherr)
 		skip = true
@@ -145,7 +147,7 @@ func init() {
 	// Start the scheduling controller. Keep this panic, if we've got this far
 	// then we should not be failing.
 	go func() {
-		if err := controller.Run(2, stopCh); err != nil {
+		if err := controller.Run(ctx, 2, stopCh); err != nil {
 			panic(fmt.Errorf("Controller failed: %s", err))
 		}
 	}()
@@ -266,6 +268,7 @@ func TestReqCheck(t *testing.T) {
 
 // This test is really to test reporting of why something might've blown up.
 func TestRunCmd(t *testing.T) {
+	ctx := context.Background()
 	if skip {
 		t.Skip("skipping test; failed to access cluster")
 	}
@@ -299,7 +302,7 @@ func TestRunCmd(t *testing.T) {
 			t.Error(err.Error())
 		}
 
-		pod, err := lc.Spawn("ubuntu:latest",
+		pod, err := lc.Spawn(ctx, "ubuntu:latest",
 			"/wr-tmp/",
 			configMountPath+"/"+client.DefaultScriptName,
 			cmd,
@@ -361,7 +364,7 @@ func TestRunCmd(t *testing.T) {
 			t.Error(err.Error())
 		}
 
-		pod, err := lc.Spawn("ubuntu:latest",
+		pod, err := lc.Spawn(ctx, "ubuntu:latest",
 			"/wr-tmp/",
 			configMountPath+"/"+client.DefaultScriptName,
 			cmd,

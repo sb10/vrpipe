@@ -1,26 +1,31 @@
-// Copyright © 2016-2019 Genome Research Limited
-// Author: Sendu Bala <sb10@sanger.ac.uk>.
-//
-//  This file is part of wr.
-//
-//  wr is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU Lesser General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  wr is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU Lesser General Public License for more details.
-//
-//  You should have received a copy of the GNU Lesser General Public License
-//  along with wr. If not, see <http://www.gnu.org/licenses/>.
+/*******************************************************************************
+ * Copyright (c) 2020, 2021 Genome Research Ltd.
+ *
+ * Author: Sendu Bala <sb10@sanger.ac.uk>, Ashwini Chhipa <ac55@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ ******************************************************************************/
 
 package internal
 
-// this file implements the config system used by the cmd package
-
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,41 +34,69 @@ import (
 	"strings"
 
 	"github.com/creasty/defaults"
-	"github.com/inconshreveable/log15"
 	"github.com/jinzhu/configor"
-	"github.com/manifoldco/promptui"
 	"github.com/olekukonko/tablewriter"
+	"github.com/wtsi-ssg/wr/clog"
+	fsd "github.com/wtsi-ssg/wr/fs/dir"
+	fp "github.com/wtsi-ssg/wr/fs/filepath"
 	"github.com/wtsi-ssg/wr/network/port"
 )
 
 const (
+	// configCommonBasename is the basename of a wr config file.
 	configCommonBasename = ".wr_config.yml"
 
-	// S3Prefix is the prefix used by S3 paths
+	// S3Prefix is the prefix used by S3 paths.
 	S3Prefix = "s3://"
 
-	// Production is the name of the main deployment
+	// Production is the name of the main deployment.
 	Production = "production"
 
-	// Development is the name of the development deployment, used during testing
+	// Development is the name of the development deployment, used during
+	// testing.
 	Development = "development"
 
-	// ConfigSourceEnvVar is a config value source
+	// ConfigSourceEnvVar is a config value source.
 	ConfigSourceEnvVar = "env var"
 
-	// ConfigSourceDefault is a config value source
+	// ConfigSourceDefault is a config value source.
 	ConfigSourceDefault = "default"
 
+	// sourcesProperty is a source property.
 	sourcesProperty = "sources"
 
-	portsNeeded      = 4
+	// portsNeeded is the number of ports used for each user.
+	portsNeeded = 4
+
+	// portsProdDevDiff is the number of difference in ports for different deployments.
 	portsProdDevDiff = 2
-	portsCmdWebDiff  = 1
-	portsMinPort     = 1021
-	portsMaxPort     = 65535
+
+	// portsCmdWebDiff is the number of difference in ports for Cmd or Web interface.
+	portsCmdWebDiff = 1
+
+	// portsMinPort is the minimum port used.
+	portsMinPort = 1021
+
+	// portsMaxPort is the maximum port available.
+	portsMaxPort = 65535
+
+	// promptStatement is used by findPorts.
+	promptStatement = `The default ports couldn't be used for you, but ports %d..%d are available right now.
+ You could use these for your managerport and managerweb config options in production and development.`
+
+	// promptQuestion is used by findPorts.
+	promptQuestion = "Write them to your config files at ~/.wr_config.production.yml and " +
+		"~/.wr_config.development.yml (y/n)?"
+
+	// localhost is the name of the host that we check ports on.
+	localhost = "localhost"
+
+	// noPortFoundErr is the error returned when no available port was found.
+	noPortFoundErr = "The default ports couldn't be used for you; " +
+		"please manually set your manager_port and manager_web config options."
 )
 
-// Config holds the configuration options for jobqueue server and client
+// Config holds the configuration options for jobqueue server and client.
 type Config struct {
 	ManagerPort          string `default:""`
 	ManagerWeb           string `default:""`
@@ -71,8 +104,8 @@ type Config struct {
 	ManagerDir           string `default:"~/.wr"`
 	ManagerPidFile       string `default:"pid"`
 	ManagerLogFile       string `default:"log"`
-	ManagerDbFile        string `default:"db"`
-	ManagerDbBkFile      string `default:"db_bk"`
+	ManagerDBFile        string `default:"db"`
+	ManagerDBBkFile      string `default:"db_bk"`
 	ManagerTokenFile     string `default:"client.token"`
 	ManagerUploadDir     string `default:"uploads"`
 	ManagerUmask         int    `default:"007"`
@@ -106,13 +139,184 @@ type Config struct {
 	sources              map[string]string
 }
 
+// FileExistsError records a file exist error.
+type FileExistsError struct {
+	Path string
+	Err  error
+}
+
+// Error returns error when a file already exists.
+func (f *FileExistsError) Error() string {
+	return fmt.Sprintf("file [%s] already exists: %s", f.Path, f.Err)
+}
+
+// Source returns where the value of a Config field was defined.
+func (c Config) Source(field string) string {
+	if c.sources == nil {
+		return ConfigSourceDefault
+	}
+
+	source, set := c.sources[field]
+	if !set {
+		return ConfigSourceDefault
+	}
+
+	return source
+}
+
+// IsProduction tells you if we're in the production deployment.
+func (c Config) IsProduction() bool {
+	return c.Deployment == Production
+}
+
+// String retruns the string value of property.
+func (c Config) String() string {
+	vals := reflect.ValueOf(c)
+	typeOfC := vals.Type()
+
+	tableString := &strings.Builder{}
+	table := tablewriter.NewWriter(tableString)
+	table.SetHeader([]string{"Config", "Value", "Source"})
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+
+	for i := 0; i < vals.NumField(); i++ {
+		property := typeOfC.Field(i).Name
+		if property == sourcesProperty {
+			continue
+		}
+
+		source := c.sources[property]
+		if source == "" {
+			source = ConfigSourceDefault
+		}
+
+		table.Append([]string{property, fmt.Sprintf("%v", vals.Field(i).Interface()), source})
+	}
+
+	table.Render()
+
+	return tableString.String()
+}
+
+// ConfigLoadFromCurrentDir loads and returns the config from current directory.
+func ConfigLoadFromCurrentDir(ctx context.Context, deployment string) *Config {
+	pwd, uid := getPWDAndUID(ctx)
+
+	return mergeAllConfigs(ctx, uid, deployment, pwd)
+}
+
+// ConfigLoadFromParentDir loads and returns the config from a parent directory
+// for testing purposes.
+func ConfigLoadFromParentDir(ctx context.Context, deployment string) *Config {
+	pwd, uid := getPWDAndUID(ctx)
+	pwd = filepath.Dir(pwd)
+
+	return mergeAllConfigs(ctx, uid, deployment, pwd)
+}
+
+// getPWDAndUID returns present working directory and user id.
+func getPWDAndUID(ctx context.Context) (string, int) {
+	pwd := fsd.GetPWD(ctx)
+	uid := os.Getuid()
+
+	return pwd, uid
+}
+
+// mergeAllConfigs function loads and merges all the configs and returns a final
+// config.
+func mergeAllConfigs(ctx context.Context, uid int, deployment string, pwd string) *Config {
+	if deployment != Development && deployment != Production {
+		deployment = DefaultDeployment(ctx)
+	}
+
+	configDef := mergeDefaultAndEnvVarsConfigs(ctx)
+
+	configDef.mergeAllConfigFiles(ctx, uid, deployment, pwd)
+
+	return configDef
+}
+
+// DefaultDeployment works out the default deployment.
+func DefaultDeployment(ctx context.Context) string {
+	deploymentEnv := os.Getenv("WR_DEPLOYMENT")
+	if deploymentEnv != "" && (deploymentEnv == Development || deploymentEnv == Production) {
+		return deploymentEnv
+	}
+
+	return defaultDeploymentBasedOnRepo(ctx)
+}
+
+// defaultDeploymentBasedOnRepo returns the deployment type based on repo.
+func defaultDeploymentBasedOnRepo(ctx context.Context) string {
+	pwd := fsd.GetPWD(ctx)
+	if _, err := os.Stat(filepath.Join(pwd, "jobqueue", "server.go")); err == nil {
+		return Development
+	}
+
+	return Production
+}
+
+// mergeDefaultAndEnvVarsConfigs returns a merged Default and EnvVar config.
+func mergeDefaultAndEnvVarsConfigs(ctx context.Context) *Config {
+	configDef := loadDefaultConfig(ctx)
+
+	fixEnvManagerUmask()
+
+	configEnv := getEnvVarsConfig(ctx)
+
+	configDef.merge(configEnv, ConfigSourceEnvVar)
+
+	return configDef
+}
+
+// loadDefaultConfig loads and return the default configs.
+func loadDefaultConfig(ctx context.Context) *Config {
+	config := &Config{}
+	if cerr := defaults.Set(config); cerr != nil {
+		clog.Fatal(ctx, cerr.Error())
+	}
+
+	return config
+}
+
+// fixEnvManagerUmask fixes the WR_MANAGERUMASK env variable. ManagerUmask is
+// likely to be zero prefixed by user, but that is not converted to int
+// correctly, so it fixes that.
+func fixEnvManagerUmask() {
+	umask := os.Getenv("WR_MANAGERUMASK")
+	if umask != "" && strings.HasPrefix(umask, "0") {
+		umask = strings.TrimLeft(umask, "0")
+		os.Setenv("WR_MANAGERUMASK", umask)
+	}
+}
+
+// getEnvVarsConfig loads the env variables into a empty config and returns
+// the final config.
+func getEnvVarsConfig(ctx context.Context) *Config {
+	// we don't os.Setenv("CONFIGOR_ENV", deployment) to stop configor loading
+	// files before we want it to
+	err := os.Setenv("CONFIGOR_ENV_PREFIX", "WR")
+	if err != nil {
+		clog.Fatal(ctx, err.Error())
+	}
+
+	configEnv := &Config{}
+
+	err = configor.Load(configEnv)
+	if err != nil {
+		clog.Fatal(ctx, err.Error())
+	}
+
+	return configEnv
+}
+
 // merge compares existing to new Config values, and for each one that has
-// changed, sets the given source on the changed property in our sources,
-// and sets the new value on ourselves.
-func (c *Config) merge(new *Config, source string) {
+// changed, sets the given source on the changed property in our sources, and
+// sets the new value on ourselves.
+func (c *Config) merge(newC *Config, source string) {
 	v := reflect.ValueOf(*c)
 	typeOfC := v.Type()
-	vNew := reflect.ValueOf(*new)
+	vNew := reflect.ValueOf(*newC)
 
 	if c.sources == nil {
 		c.sources = make(map[string]string)
@@ -128,393 +332,287 @@ func (c *Config) merge(new *Config, source string) {
 			c.sources[property] = source
 
 			adrField := reflect.ValueOf(c).Elem().Field(i)
-			switch typeOfC.Field(i).Type.Kind() {
-			case reflect.String:
-				adrField.SetString(vNew.Field(i).String())
-			case reflect.Int:
-				adrField.SetInt(vNew.Field(i).Int())
-			case reflect.Bool:
-				adrField.SetBool(vNew.Field(i).Bool())
-			}
+			setSourceOnChangeProp(typeOfC, adrField, vNew, i)
 		}
 	}
+}
+
+// mergeAllConfigFiles merges all the config files and adjusts config
+// properties.
+func (c *Config) mergeAllConfigFiles(ctx context.Context, uid int, deployment string, pwd string) {
+	configDeploymentBasename := ".wr_config." + deployment + ".yml"
+
+	if configDir := os.Getenv("WR_CONFIG_DIR"); configDir != "" {
+		c.configLoadFromFile(ctx, filepath.Join(configDir, configCommonBasename))
+		c.configLoadFromFile(ctx, filepath.Join(configDir, configDeploymentBasename))
+	}
+
+	home := fsd.GetHome(ctx)
+
+	c.configLoadFromFile(ctx, filepath.Join(home, configCommonBasename))
+	c.configLoadFromFile(ctx, filepath.Join(home, configDeploymentBasename))
+
+	c.configLoadFromFile(ctx, filepath.Join(pwd, configCommonBasename))
+	c.configLoadFromFile(ctx, filepath.Join(pwd, configDeploymentBasename))
+
+	c.adjustConfigProperties(ctx, uid, deployment)
+}
+
+// configLoadFromFile loads a config from a file and merges into the current
+// config.
+func (c *Config) configLoadFromFile(ctx context.Context, path string) {
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+
+	configFile := c.clone()
+
+	if err := configor.Load(configFile, path); err != nil {
+		clog.Fatal(ctx, err.Error())
+	}
+
+	c.merge(configFile, path)
 }
 
 // clone makes a new Config with our values.
 func (c *Config) clone() *Config {
-	new := &Config{}
+	newC := &Config{}
 
 	v := reflect.ValueOf(*c)
 	typeOfC := v.Type()
+
 	for i := 0; i < v.NumField(); i++ {
 		property := typeOfC.Field(i).Name
 		if property == sourcesProperty {
 			continue
 		}
 
-		adrField := reflect.ValueOf(new).Elem().Field(i)
-		switch typeOfC.Field(i).Type.Kind() {
-		case reflect.String:
-			adrField.SetString(v.Field(i).String())
-		case reflect.Int:
-			adrField.SetInt(v.Field(i).Int())
-		case reflect.Bool:
-			adrField.SetBool(v.Field(i).Bool())
-		}
+		adrField := reflect.ValueOf(newC).Elem().Field(i)
+		setSourceOnChangeProp(typeOfC, adrField, v, i)
 	}
 
-	new.sources = make(map[string]string)
+	newC.sources = make(map[string]string)
 	for key, val := range c.sources {
-		new.sources[key] = val
+		newC.sources[key] = val
 	}
 
-	return new
+	return newC
 }
 
-// Source returns where the value of a Config field was defined.
-func (c Config) Source(field string) string {
-	if c.sources == nil {
-		return ConfigSourceDefault
-	}
-	source, set := c.sources[field]
-	if !set {
-		return ConfigSourceDefault
-	}
-	return source
-}
-
-func (c Config) String() string {
-	v := reflect.ValueOf(c)
-	typeOfC := v.Type()
-
-	tableString := &strings.Builder{}
-	table := tablewriter.NewWriter(tableString)
-	table.SetHeader([]string{"Config", "Value", "Source"})
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-	for i := 0; i < v.NumField(); i++ {
-		property := typeOfC.Field(i).Name
-		if property == sourcesProperty {
-			continue
-		}
-
-		source := c.sources[property]
-		if source == "" {
-			source = ConfigSourceDefault
-		}
-
-		table.Append([]string{property, fmt.Sprintf("%v", v.Field(i).Interface()), source})
-	}
-
-	table.Render()
-	return tableString.String()
-}
-
-/*
-ConfigLoad loads configuration settings from files and environment
-variables. Note, this function exits on error, since without config we can't
-do anything.
-
-We prefer settings in config file in current dir (or the current dir's parent
-dir if the useparentdir option is true (used for test scripts)) over config file
-in home directory over config file in dir pointed to by WR_CONFIG_DIR.
-
-The deployment argument determines if we read .wr_config.production.yml or
-.wr_config.development.yml; we always read .wr_config.yml. If the empty
-string is supplied, deployment is development if you're in the git repository
-directory. Otherwise, deployment is taken from the environment variable
-WR_DEPLOYMENT, and if that's not set it defaults to production.
-
-Multiple of these files can be used to have settings that are common to
-multiple users and deployments, and settings specific to users or deployments.
-
-Settings found in no file can be set with the environment variable
-WR_<setting name in caps>, eg.
-export WR_MANAGER_PORT="11301"
-*/
-func ConfigLoad(deployment string, useparentdir bool, logger log15.Logger) Config {
-	pwd, err := os.Getwd()
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
-
-	if useparentdir {
-		pwd = filepath.Dir(pwd)
-	}
-
-	// if deployment not set on the command line
-	if deployment != Development && deployment != Production {
-		deployment = DefaultDeployment(logger)
-	}
-	// we don't os.Setenv("CONFIGOR_ENV", deployment) to stop configor loading
-	// files we before we want it to
-	err = os.Setenv("CONFIGOR_ENV_PREFIX", "WR")
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
-
-	// because we want to know the source of every value, we can't take
-	// advantage of configor.Load() being able to take all env vars and config
-	// files at once. We do it repeatedly and merge results instead
-	config := &Config{}
-	if cerr := defaults.Set(config); cerr != nil {
-		logger.Error(cerr.Error())
-		os.Exit(1)
-	}
-
-	// load env vars. ManagerUmask is likely to be zero prefixed by user, but
-	// that is not converted to int correctly, so fix first
-	umask := os.Getenv("WR_MANAGERUMASK")
-	if umask != "" && strings.HasPrefix(umask, "0") {
-		umask = strings.TrimLeft(umask, "0")
-		os.Setenv("WR_MANAGERUMASK", umask)
-	}
-	configEnv := &Config{}
-	err = configor.Load(configEnv)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
-	config.merge(configEnv, ConfigSourceEnvVar)
-
-	// read each config file and merge results
-	configDeploymentBasename := ".wr_config." + deployment + ".yml"
-
-	if configDir := os.Getenv("WR_CONFIG_DIR"); configDir != "" {
-		configLoadFromFile(config, filepath.Join(configDir, configCommonBasename), logger)
-		configLoadFromFile(config, filepath.Join(configDir, configDeploymentBasename), logger)
-	}
-
-	home, herr := os.UserHomeDir()
-	if herr != nil || home == "" {
-		logger.Error("could not find home dir", "err", herr)
-		os.Exit(1)
-	}
-	configLoadFromFile(config, filepath.Join(home, configCommonBasename), logger)
-	configLoadFromFile(config, filepath.Join(home, configDeploymentBasename), logger)
-
-	configLoadFromFile(config, filepath.Join(pwd, configCommonBasename), logger)
-	configLoadFromFile(config, filepath.Join(pwd, configDeploymentBasename), logger)
-
-	// adjust properties as needed
-	config.Deployment = deployment
-
-	// convert the possible ~/ in Manager_dir to abs path to user's home
-	config.ManagerDir = TildaToHome(config.ManagerDir)
-	config.ManagerDir += "_" + deployment
-
-	// convert the possible relative paths in Manager_*_file to abs paths in
-	// ManagerDir
-	if !filepath.IsAbs(config.ManagerPidFile) {
-		config.ManagerPidFile = filepath.Join(config.ManagerDir, config.ManagerPidFile)
-	}
-	if !filepath.IsAbs(config.ManagerLogFile) {
-		config.ManagerLogFile = filepath.Join(config.ManagerDir, config.ManagerLogFile)
-	}
-	if !filepath.IsAbs(config.ManagerDbFile) {
-		config.ManagerDbFile = filepath.Join(config.ManagerDir, config.ManagerDbFile)
-	}
-	if !IsRemote(config.ManagerDbBkFile) && !filepath.IsAbs(config.ManagerDbBkFile) {
-		config.ManagerDbBkFile = filepath.Join(config.ManagerDir, config.ManagerDbBkFile)
-	}
-	if !filepath.IsAbs(config.ManagerCAFile) {
-		config.ManagerCAFile = filepath.Join(config.ManagerDir, config.ManagerCAFile)
-	}
-	if !filepath.IsAbs(config.ManagerCertFile) {
-		config.ManagerCertFile = filepath.Join(config.ManagerDir, config.ManagerCertFile)
-	}
-	if !filepath.IsAbs(config.ManagerKeyFile) {
-		config.ManagerKeyFile = filepath.Join(config.ManagerDir, config.ManagerKeyFile)
-	}
-	if !filepath.IsAbs(config.ManagerTokenFile) {
-		config.ManagerTokenFile = filepath.Join(config.ManagerDir, config.ManagerTokenFile)
-	}
-	if !filepath.IsAbs(config.ManagerUploadDir) {
-		config.ManagerUploadDir = filepath.Join(config.ManagerDir, config.ManagerUploadDir)
-	}
-
-	// if not explicitly set, calculate ports that no one else would be
-	// assigned by us (and hope no other software is using it...)
-	if config.ManagerPort == "" {
-		config.ManagerPort = calculatePort(config, "cli", logger)
-	}
-	if config.ManagerWeb == "" {
-		config.ManagerWeb = calculatePort(config, "webi", logger)
-	}
-
-	return *config
-}
-
-func configLoadFromFile(config *Config, path string, logger log15.Logger) {
-	_, err := os.Stat(path)
-	if err != nil {
+// setSourceOnChangeProp sets the source of a property, when its value is
+// changed.
+func setSourceOnChangeProp(typeOfC reflect.Type, adrField reflect.Value,
+	newVal reflect.Value, idx int) {
+	switch typeOfC.Field(idx).Type.Kind() {
+	case reflect.String:
+		adrField.SetString(newVal.Field(idx).String())
+	case reflect.Int:
+		adrField.SetInt(newVal.Field(idx).Int())
+	case reflect.Bool:
+		adrField.SetBool(newVal.Field(idx).Bool())
+	default:
 		return
 	}
+}
 
-	configFile := config.clone()
-	err = configor.Load(configFile, path)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
+// adjustConfigProperties adjusts the config properties for pid, log file,
+// upload dir paths, certs and db files.
+func (c *Config) adjustConfigProperties(ctx context.Context, uid int, deployment string) {
+	c.Deployment = deployment
+
+	c.ManagerDir = fp.TildaToHome(c.ManagerDir)
+	c.ManagerDir += "_" + deployment
+
+	c.convRelativeToAbsPaths()
+	c.setManagerPort(ctx, uid)
+}
+
+// convRelativeToAbsPaths converts the possible relative paths of various
+// properties to abs paths in ManagerDir.
+func (c *Config) convRelativeToAbsPaths() {
+	c.convRelativeToAbsPath(&c.ManagerPidFile)
+	c.convRelativeToAbsPath(&c.ManagerLogFile)
+	c.convRelativeToAbsPath(&c.ManagerUploadDir)
+
+	c.convRelativeToAbsPath(&c.ManagerCAFile)
+	c.convRelativeToAbsPath(&c.ManagerCertFile)
+	c.convRelativeToAbsPath(&c.ManagerKeyFile)
+	c.convRelativeToAbsPath(&c.ManagerTokenFile)
+	c.convRelativeToAbsPath(&c.ManagerDBFile)
+
+	if !IsRemote(c.ManagerDBBkFile) {
+		c.convRelativeToAbsPath(&c.ManagerDBBkFile)
 	}
-	config.merge(configFile, path)
 }
 
-// IsProduction tells you if we're in the production deployment.
-func (c Config) IsProduction() bool {
-	return c.Deployment == Production
-}
-
-// IsDevelopment tells you if we're in the development deployment.
-func (c Config) IsDevelopment() bool {
-	return c.Deployment == Development
-}
-
-// DefaultDeployment works out the default deployment.
-func DefaultDeployment(logger log15.Logger) string {
-	pwd, err := os.Getwd()
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
+// convRelativeToAbsPath converts the possible relative path to abs path of a
+// property in ManagerDir.
+func (c *Config) convRelativeToAbsPath(property *string) {
+	if !filepath.IsAbs(*property) {
+		*property = filepath.Join(c.ManagerDir, *property)
 	}
-
-	// if we're in the git repository
-	var deployment string
-	if _, err := os.Stat(filepath.Join(pwd, "jobqueue", "server.go")); err == nil {
-		// force development
-		deployment = Development
-	} else {
-		// default to production
-		deployment = Production
-
-		// and allow env var to override with development
-		if deploymentEnv := os.Getenv("WR_DEPLOYMENT"); deploymentEnv != "" {
-			if deploymentEnv == Development {
-				deployment = Development
-			}
-		}
-	}
-	return deployment
 }
 
-// DefaultConfig works out the default config for when we need to be able to
-// report the default before we know what deployment the user has actually
-// chosen, ie. before we have a final config.
-func DefaultConfig(logger log15.Logger) Config {
-	return ConfigLoad(DefaultDeployment(logger), false, logger)
-}
-
-// DefaultServer works out the default server (we need this to be able to report
-// this default before we know what deployment the user has actually chosen, ie.
-// before we have a final config).
-func DefaultServer(logger log15.Logger) (server string) {
-	config := DefaultConfig(logger)
-	return config.ManagerHost + ":" + config.ManagerPort
-}
-
-// Calculate a port number that will be unique to this user, deployment and
-// ptype ("cli" or "webi").
-func calculatePort(config *Config, ptype string, logger log15.Logger) (port string) {
-	uid, err := Userid()
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
+// setManagerPort sets the cli and web interface ports for manager.
+func (c *Config) setManagerPort(ctx context.Context, uid int) {
+	if c.ManagerPort == "" {
+		c.ManagerPort = calculatePort(ctx, c, uid, localhost, "cli")
 	}
 
-	// our port must be greater than 1024, and by basing on user id we can
-	// avoid conflicts with other users of wr on the same machine; we
-	// multiply by 4 because we have to reserve 4 ports for each user
-	pn := portsMinPort + (uid * portsNeeded)
+	if c.ManagerWeb == "" {
+		c.ManagerWeb = calculatePort(ctx, c, uid, localhost, "webi")
+	}
+}
 
-	found := false
-	if pn+portsNeeded-1 > portsMaxPort {
-		pn = findPorts(logger)
-		found = true
+// calculatePort calculates a port number that will be unique to this user,
+// deployment and ptype ("cli" or "webi"). It returns a string because port is
+// usually used as a part of a connection string.
+func calculatePort(ctx context.Context, config *Config, uid int, hostname string, ptype string) string {
+	pn, found := getMinPort(ctx, hostname, uid)
+
+	if pn == 0 {
+		return ""
 	}
 
 	if config.Deployment == Development {
 		pn += portsProdDevDiff
 	}
+
 	if ptype == "webi" {
 		pn += portsCmdWebDiff
 	} else if found {
 		config.ManagerWeb = strconv.Itoa(pn + portsCmdWebDiff)
 	}
 
-	// it's easier for the things that use this port number if it's a string
-	// (because it's used as part of a connection string)
 	return strconv.Itoa(pn)
+}
+
+// getMinPort calculates and returns the minimum port available. Our port must
+// be greater than 1024, and by basing on user id we can avoid conflicts with
+// other users of wr on the same machine; we multiply by 4 because we have to
+// reserve 4 ports for each user. If that port would be too high, then we get an
+// available port.
+func getMinPort(ctx context.Context, hostname string, uid int) (int, bool) {
+	pn := portsMinPort + (uid * portsNeeded)
+
+	if pn+portsNeeded-1 > portsMaxPort {
+		checker := getPortChecker(ctx, hostname)
+		if checker == nil {
+			return 0, false
+		}
+
+		pn = findPorts(ctx, checker)
+	}
+
+	return pn, true
+}
+
+// getPortChecker returns a port checker given a hostname and exits on error.
+func getPortChecker(ctx context.Context, hostname string) *port.Checker {
+	checker, err := port.NewChecker(hostname)
+	if err != nil {
+		exitDueToNoPorts(ctx, err, "localhost couldn't be connected to")
+
+		return nil
+	}
+
+	return checker
 }
 
 // findPorts asks the OS for an available port range, then asks the user if
 // they'd like to use it and writes it to their config file.
-func findPorts(logger log15.Logger) int {
-	checker, err := port.NewChecker("localhost")
-	if err != nil {
-		exitDueToNoPorts(err, "localhost couldn't be connected to", logger)
+func findPorts(ctx context.Context, checker *port.Checker) int {
+	min, max := getAvailableRange(ctx, checker)
+	if min == 0 || max == 0 {
+		return 0
 	}
 
-	min, max, err := checker.AvailableRange(portsNeeded)
-	if err != nil {
-		exitDueToNoPorts(err, "available localhost ports couldn't be checked", logger)
-	}
+	fmt.Printf(promptStatement, min, max)
 
-	fmt.Printf("The default ports couldn't be used for you, but ports %d..%d are available right now.\nYou could use these for your managerport and managerweb config options in production and development.\n", min, max)
-	prompt := promptui.Select{
-		Label:    "Write them to your config files at ~/.wr_config.production.yml and ~/.wr_config.development.yml?",
-		Items:    []string{"Yes", "No"},
-		HideHelp: true,
-	}
+	var response string
 
-	_, result, err := prompt.Run()
-	if err != nil {
-		exitDueToNoPorts(err, "didn't understand your response", logger)
-	}
+	fmt.Println(promptQuestion)
+	fmt.Scanf("%s\n", &response)
 
-	if result == "No" {
-		exitDueToNoPorts(nil, "you chose not to use suggested ports", logger)
-	}
+	if response == "y" {
+		writePortsToConfigFiles(ctx, min)
+	} else {
+		exitDueToNoPorts(ctx, nil, "you chose not to use suggested ports")
 
-	writePortsToConfigFiles(min, logger)
+		return 0
+	}
 
 	return min
 }
 
-// exitDueToNoPorts exits non-zero with an error because we can't continue
-// without knowing our ports.
-func exitDueToNoPorts(err error, msg string, logger log15.Logger) {
-	logger.Error("The default ports couldn't be used for you; please manually set your manager_port and manager_web config options.", "msg", msg, "err", err)
-	os.Exit(1)
-}
+// getAvailableRange returns the min and max port numbers available, else
+// returns 0, 0 and exits on error.
+func getAvailableRange(ctx context.Context, checker *port.Checker) (int, int) {
+	min, max, err := checker.AvailableRange(portsNeeded)
+	if err != nil {
+		exitDueToNoPorts(ctx, err, "available localhost ports couldn't be checked")
 
-func writePortsToConfigFiles(pn int, logger log15.Logger) {
-	home, herr := os.UserHomeDir()
-	if herr != nil || home == "" {
-		logger.Error("could not find home dir", "err", herr)
-		os.Exit(1)
+		return 0, 0
 	}
 
-	writePortsToConfigFile(pn, home, Production, logger)
-	writePortsToConfigFile(pn+portsProdDevDiff, home, Development, logger)
+	return min, max
 }
 
-func writePortsToConfigFile(pn int, home, deployment string, logger log15.Logger) {
+// exitDueToNoPorts exits non-zero with an error because we can't continue
+// without knowing our ports.
+func exitDueToNoPorts(ctx context.Context, err error, msg string) {
+	clog.Fatal(ctx, noPortFoundErr, "msg", msg, "err", err)
+}
+
+// writePortsToConfigFiles writes ports to production and development config
+// files.
+func writePortsToConfigFiles(ctx context.Context, pn int) {
+	home := fsd.GetHome(ctx)
+
+	writePortsToConfigFile(ctx, pn, home, Production)
+	writePortsToConfigFile(ctx, pn+portsProdDevDiff, home, Development)
+}
+
+// writePortsToConfigFile writes ports to a config file given the deployment
+// type.
+func writePortsToConfigFile(ctx context.Context, pn int, home, deployment string) {
 	f, err := os.OpenFile(filepath.Join(home, ".wr_config."+deployment+".yml"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		logger.Error("could not open config file.", "err", err)
-		os.Exit(1)
+		clog.Fatal(ctx, "could not open config file", "err", err)
+
+		return
 	}
 
-	if _, err := f.WriteString(fmt.Sprintf("managerport: \"%d\"\nmanagerweb: \"%d\"\n", pn, pn+portsCmdWebDiff)); err != nil {
-		logger.Error("could not write to config file.", "err", err)
-		f.Close()
-		os.Exit(1)
-	}
+	writeString := fmt.Sprintf("managerport: \"%d\"\nmanagerweb: \"%d\"\n", pn, pn+portsCmdWebDiff)
+
+	writePorts(ctx, f, writeString)
 
 	f.Close()
+}
+
+// writePorts will write a port string to a file given its file handler.
+func writePorts(ctx context.Context, filep *os.File, writeString string) {
+	if _, err := filep.WriteString(writeString); err != nil {
+		filep.Close()
+		clog.Fatal(ctx, "could not write to config file", "err", err)
+	}
+}
+
+// DefaultConfig works out the default config for when we need to be able to
+// report the default before we know what deployment the user has actually
+// chosen, ie. before we have a final config.
+func DefaultConfig(ctx context.Context) *Config {
+	return ConfigLoadFromCurrentDir(ctx, DefaultDeployment(ctx))
+}
+
+// DefaultServer works out the default server (we need this to be able to report
+// this default before we know what deployment the user has actually chosen, ie.
+// before we have a final config).
+func DefaultServer(ctx context.Context) string {
+	config := DefaultConfig(ctx)
+
+	return config.ManagerHost + ":" + config.ManagerPort
 }
 
 // InS3 tells you if a path is to a file in S3.

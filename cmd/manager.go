@@ -1,4 +1,4 @@
-// Copyright © 2016-2020 Genome Research Limited
+// Copyright © 2016-2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -21,6 +21,7 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,15 +32,14 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/cloud"
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	jqs "github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	"github.com/VertebrateResequencing/wr/kubernetes/client"
-	"github.com/inconshreveable/log15"
 	"github.com/kardianos/osext"
-	"github.com/sb10/l15h"
 	"github.com/sb10/waitgroup"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
@@ -139,6 +139,7 @@ OpenStack, and if a key with that name already exists, the manager will not be
 able to create a new one (or get the existing one), and so will not function
 fully.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		// first we need our working directory to exist
 		createWorkingDir()
 
@@ -199,7 +200,7 @@ fully.`,
 		// now daemonize unless in foreground mode
 		if foreground {
 			syscall.Umask(config.ManagerUmask)
-			startJQ(postCreation)
+			startJQ(ctx, postCreation)
 		} else {
 			child, context := daemonize(config.ManagerPidFile, config.ManagerUmask, extraArgs...)
 			if child != nil {
@@ -235,7 +236,7 @@ fully.`,
 						warn("daemon release failed: %s", err)
 					}
 				}()
-				startJQ(postCreation)
+				startJQ(ctx, postCreation)
 			}
 		}
 	},
@@ -372,9 +373,11 @@ down will be lost.`,
 			info("wr manager running on port %s is drained: there were no jobs still running, so the manger should stop right away.", config.ManagerPort)
 			deleteToken()
 		} else if numLeft == 1 {
-			info("wr manager running on port %s is now draining; there is a job still running, and it should %s", config.ManagerPort, completeMsg)
+			info("wr manager running on port %s is now draining; there is a job still running, and it should %s",
+				config.ManagerPort, completeMsg)
 		} else {
-			info("wr manager running on port %s is now draining; there are %d jobs still running, and they should %s", config.ManagerPort, numLeft, completeMsg)
+			info("wr manager running on port %s is now draining; there are %d jobs still running, and they should %s",
+				config.ManagerPort, numLeft, completeMsg)
 		}
 
 		err = jq.Disconnect()
@@ -472,7 +475,8 @@ var managerStatusCmd = &cobra.Command{
 				return
 			}
 
-			die("wr manager on port %s is supposed to be running with pid %d, but is non-responsive", config.ManagerPort, pid)
+			die("wr manager on port %s is supposed to be running with pid %d, but is non-responsive",
+				config.ManagerPort, pid)
 		}
 
 		// no pid file, so it's supposed to be down; confirm
@@ -528,6 +532,7 @@ func reportLiveStatus(jq *jobqueue.Client) {
 }
 
 func init() {
+	ctx := context.Background()
 	defaultMaxRAM, err := internal.ProcMeminfoMBs()
 	if err != nil {
 		defaultMaxRAM = 0
@@ -543,7 +548,7 @@ func init() {
 	managerCmd.AddCommand(managerBackupCmd)
 
 	// flags specific to these sub-commands
-	defaultConfig := internal.DefaultConfig(appLogger)
+	defaultConfig := internal.DefaultConfig(ctx)
 	managerStartCmd.Flags().BoolVarP(&foreground, "foreground", "f", false, "do not daemonize")
 	managerStartCmd.Flags().StringVarP(&scheduler, "scheduler", "s", defaultConfig.ManagerScheduler, "['local','lsf','openstack'] job scheduler")
 	managerStartCmd.Flags().IntVarP(&managerTimeoutSeconds, "timeout", "t", 10, "how long to wait in seconds for the manager to start up")
@@ -580,7 +585,7 @@ func logStarted(s *jobqueue.ServerInfo, token []byte) {
 
 	// go back to just stderr so we don't log token to file (this doesn't affect
 	// server logging)
-	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
+	clog.ToDefaultAtLevel("info")
 	info("wr's web interface can be reached at https://%s:%s/?token=%s", s.Host, s.WebPort, string(token))
 
 	if setDomainIP {
@@ -597,7 +602,7 @@ func logStarted(s *jobqueue.ServerInfo, token []byte) {
 	}
 }
 
-func startJQ(postCreation []byte) {
+func startJQ(ctx context.Context, postCreation []byte) {
 	if runtime.NumCPU() == 1 {
 		// we might lock up with only 1 proc if we mount
 		runtime.GOMAXPROCS(2)
@@ -605,22 +610,23 @@ func startJQ(postCreation []byte) {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	}
 
-	// change the app logger to log to both STDERR and our configured log file;
+	// change the logger to log to both STDERR and our configured log file;
 	// we also create a new logger for internal use by the server later
-	serverLogger := log15.New()
-	fh, err := log15.FileHandler(config.ManagerLogFile, log15.LogfmtFormat())
+	clog.ToDefault()
+
+	logLevel := "warn"
+
+	if managerDebug {
+		logLevel = "debug"
+	}
+
+	fileHandler, err := clog.CreateFileHandlerAtLevel(config.ManagerLogFile, logLevel)
+
 	if err != nil {
 		warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
-	} else {
-		l15h.AddHandler(appLogger, fh)
-
-		// have the server logger output to file, levelled with caller info
-		logLevel := log15.LvlWarn
-		if managerDebug {
-			logLevel = log15.LvlDebug
-		}
-		serverLogger.SetHandler(log15.LvlFilterHandler(logLevel, l15h.CallerInfoHandler(fh)))
 	}
+
+	clog.AddHandler(fileHandler)
 
 	// we will spawn runners, which means we need to know the path to ourselves
 	// in case we're not in the user's $PATH
@@ -707,7 +713,8 @@ func startJQ(postCreation []byte) {
 		if scheduler != kubernetes {
 			// also check that we're actually in the cloud, or this is not going to
 			// work
-			provider, errc := cloud.New(scheduler, cloudResourceName(localUsername), filepath.Join(config.ManagerDir, "cloud_resources."+scheduler), appLogger)
+			provider, errc := cloud.New(ctx, scheduler, cloudResourceName(localUsername),
+				filepath.Join(config.ManagerDir, "cloud_resources."+scheduler))
 			if errc != nil {
 				die("could not connect to %s: %s", scheduler, errc)
 			}
@@ -735,23 +742,24 @@ func startJQ(postCreation []byte) {
 	sync.Opts.OnPotentialDeadlock = func() {
 		wgMsg := wgDebug.String()
 		if wgMsg != "" {
-			serverLogger.Warn("waitgroups waiting", "msgs", wgMsg)
+			clog.Warn(ctx, "waitgroups waiting", "msgs", wgMsg)
 			wgDebug.Reset()
 		}
-		serverLogger.Crit("deadlock", "err", deadlockBuf.String())
+
+		clog.Crit(ctx, "deadlock", "err", deadlockBuf.String())
 	}
 	waitgroup.Opts.Logger = &wgDebug
 	waitgroup.Opts.Disable = false
 
 	// start the jobqueue server
-	server, msg, token, err := jobqueue.Serve(jobqueue.ServerConfig{
+	server, msg, token, err := jobqueue.Serve(ctx, jobqueue.ServerConfig{
 		Port:            config.ManagerPort,
 		WebPort:         config.ManagerWeb,
 		SchedulerName:   scheduler,
 		SchedulerConfig: schedulerConfig,
 		RunnerCmd:       runnerCmd,
-		DBFile:          config.ManagerDbFile,
-		DBFileBackup:    config.ManagerDbBkFile,
+		DBFile:          config.ManagerDBFile,
+		DBFileBackup:    config.ManagerDBBkFile,
 		TokenFile:       config.ManagerTokenFile,
 		UploadDir:       config.ManagerUploadDir,
 		CAFile:          config.ManagerCAFile,
@@ -762,7 +770,6 @@ func startJQ(postCreation []byte) {
 		AutoConfirmDead: time.Duration(cloudServersAutoConfirmDead) * time.Minute,
 		Deployment:      config.Deployment,
 		CIDR:            serverCIDR,
-		Logger:          serverLogger,
 	})
 
 	if msg != "" {
@@ -774,14 +781,20 @@ func startJQ(postCreation []byte) {
 	}
 
 	logStarted(server.ServerInfo, token)
-	l15h.AddHandler(appLogger, fh) // logStarted disabled logging to file; reenable to get final message below
+
+	fileHandler, err = clog.CreateFileHandlerAtLevel(config.ManagerLogFile, logLevel)
+	if err != nil {
+		warn("wr manager could not log to %s: %s", config.ManagerLogFile, err)
+	}
+
+	clog.AddHandler(fileHandler)
 
 	// block forever while the jobqueue does its work
 	err = server.Block()
 
 	wgMsg := wgDebug.String()
 	if wgMsg != "" {
-		serverLogger.Warn("waitgroups waiting", "msgs", wgMsg)
+		clog.Warn(ctx, "waitgroups waiting", "msgs", wgMsg)
 	}
 
 	if err != nil {

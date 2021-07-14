@@ -21,6 +21,7 @@ package cloud
 // This file contains a provideri implementation for OpenStack
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -35,6 +36,7 @@ import (
 
 	sync "github.com/sasha-s/go-deadlock"
 	"github.com/sb10/waitgroup"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VividCortex/ewma"
@@ -58,7 +60,6 @@ import (
 	"github.com/gophercloud/utils/openstack/clientconfig"
 	networksutil "github.com/gophercloud/utils/openstack/networking/v2/networks"
 	"github.com/hashicorp/go-multierror"
-	"github.com/inconshreveable/log15"
 	"github.com/jpillora/backoff"
 	"golang.org/x/crypto/ssh"
 )
@@ -120,24 +121,23 @@ type openstackp struct {
 	spawnTimes        ewma.MovingAverage
 	spawnTimesVolume  ewma.MovingAverage
 	tenantID          string
-	log15.Logger
-	computeClient   *gophercloud.ServiceClient
-	errorBackoff    *backoff.Backoff
-	fmap            map[string]*Flavor
-	imap            map[string]*images.Image
-	ipNet           *net.IPNet
-	networkClient   *gophercloud.ServiceClient
-	ownServer       *servers.Server
-	fmapMutex       sync.RWMutex
-	imapMutex       sync.RWMutex
-	stMutex         sync.RWMutex
-	spMutex         sync.RWMutex
-	createdKeyPair  bool
-	useConfigDrive  bool
-	hasDefaultGroup bool
-	spawnFailed     bool
-	networks        []servers.Network
-	createdPorts    map[string][]string
+	computeClient     *gophercloud.ServiceClient
+	errorBackoff      *backoff.Backoff
+	fmap              map[string]*Flavor
+	imap              map[string]*images.Image
+	ipNet             *net.IPNet
+	networkClient     *gophercloud.ServiceClient
+	ownServer         *servers.Server
+	fmapMutex         sync.RWMutex
+	imapMutex         sync.RWMutex
+	stMutex           sync.RWMutex
+	spMutex           sync.RWMutex
+	createdKeyPair    bool
+	useConfigDrive    bool
+	hasDefaultGroup   bool
+	spawnFailed       bool
+	networks          []servers.Network
+	createdPorts      map[string][]string
 }
 
 // requiredEnv returns envs that are definitely required.
@@ -152,9 +152,7 @@ func (p *openstackp) maybeEnv() []string {
 
 // initialize uses our required environment variables to authenticate with
 // OpenStack and create some clients we will use in the other methods.
-func (p *openstackp) initialize(logger log15.Logger) error {
-	p.Logger = logger.New("cloud", "openstack")
-
+func (p *openstackp) initialize() error {
 	// we use a non-standard env var to find the default network from which to
 	// get floating IPs from, which defaults depending on age of OpenStack
 	// installation
@@ -365,7 +363,7 @@ func (p *openstackp) getImageFromCache(prefix string) *images.Image {
 }
 
 // deploy achieves the aims of Deploy().
-func (p *openstackp) deploy(resources *Resources, requiredPorts []int, useConfigDrive bool, gatewayIP, cidr string, dnsNameServers []string) error {
+func (p *openstackp) deploy(ctx context.Context, resources *Resources, requiredPorts []int, useConfigDrive bool, gatewayIP, cidr string, dnsNameServers []string) error {
 	// the resource name can only contain letters, numbers, underscores,
 	// spaces and hyphens
 	if !openstackValidResourceNameRegexp.MatchString(resources.ResourceName) {
@@ -492,7 +490,7 @@ func (p *openstackp) deploy(resources *Resources, requiredPorts []int, useConfig
 	// don't create any more resources if we're already running in OpenStack
 	var mainNetworkUUID string
 	var otherNetworkUUIDs []string
-	if p.inCloud() {
+	if p.inCloud(ctx) {
 		// work out our network uuid, needed for spawning later
 		for networkName := range p.ownServer.Addresses {
 			networkUUID, erri := networksutil.IDFromName(p.networkClient, networkName)
@@ -665,7 +663,7 @@ func (p *openstackp) getCurrentServers(resources *Resources) ([][]string, error)
 
 // inCloud checks if we're currently running on an OpenStack server based on our
 // hostname matching a host in OpenStack.
-func (p *openstackp) inCloud() bool {
+func (p *openstackp) inCloud(ctx context.Context) bool {
 	hostname, err := os.Hostname()
 	inCloud := false
 	if err == nil {
@@ -690,7 +688,7 @@ func (p *openstackp) inCloud() bool {
 		})
 
 		if err != nil {
-			p.Warn("paging through servers failed", "err", err)
+			clog.Warn(ctx, "paging through servers failed", "err", err)
 		}
 	}
 
@@ -698,14 +696,14 @@ func (p *openstackp) inCloud() bool {
 }
 
 // flavors returns all our flavors.
-func (p *openstackp) flavors() map[string]*Flavor {
+func (p *openstackp) flavors(ctx context.Context) map[string]*Flavor {
 	// update the cached flavors at most once every half hour
 	p.fmapMutex.RLock()
 	if time.Since(p.lastFlavorCache) > 30*time.Minute {
 		p.fmapMutex.RUnlock()
 		err := p.cacheFlavors()
 		if err != nil {
-			p.Warn("failed to cache available flavors", "err", err)
+			clog.Warn(ctx, "failed to cache available flavors", "err", err)
 		}
 		p.fmapMutex.RLock()
 	}
@@ -718,7 +716,7 @@ func (p *openstackp) flavors() map[string]*Flavor {
 }
 
 // getQuota achieves the aims of GetQuota().
-func (p *openstackp) getQuota() (*Quota, error) {
+func (p *openstackp) getQuota(ctx context.Context) (*Quota, error) {
 	// query our quota
 	q, err := quotasets.Get(p.computeClient, p.tenantID).Extract()
 	if err != nil {
@@ -735,7 +733,7 @@ func (p *openstackp) getQuota() (*Quota, error) {
 	// (*** gophercloud currently doesn't implement getting this properly)
 	err = p.cacheFlavors()
 	if err != nil {
-		p.Warn("failed to cache available flavors", "err", err)
+		clog.Warn(ctx, "failed to cache available flavors", "err", err)
 	}
 	pager := servers.List(p.computeClient, servers.ListOpts{})
 	err = pager.EachPage(func(page pagination.Page) (bool, error) {
@@ -752,7 +750,8 @@ func (p *openstackp) getQuota() (*Quota, error) {
 			// flavor that no longer exists, so we allow invalid flavor errors
 			if errf != nil {
 				if strings.HasPrefix(errf.Error(), invalidFlavorIDMsg) {
-					p.Warn("an old server has a flavor that no longer exists; our remaining quota estimation will be off", "server", server.ID, "flavor", server.Flavor["id"].(string))
+					warnStr := "an old server has a flavor that no longer exists; our remaining quota estimation will be off"
+					clog.Warn(ctx, warnStr, "server", server.ID, "flavor", server.Flavor["id"].(string))
 				} else {
 					return false, errf
 				}
@@ -771,7 +770,7 @@ func (p *openstackp) getQuota() (*Quota, error) {
 }
 
 // spawn achieves the aims of Spawn()
-func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID string, diskGB int, externalIP bool, usingQuotaCh chan bool) (serverID, serverIP, serverName, adminPass string, err error) {
+func (p *openstackp) spawn(ctx context.Context, resources *Resources, osPrefix string, flavorID string, diskGB int, externalIP bool, usingQuotaCh chan bool) (serverID, serverIP, serverName, adminPass string, err error) {
 	// get the image that matches desired OS
 	image, err := p.getImage(osPrefix)
 	if err != nil {
@@ -796,7 +795,7 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 	p.spMutex.RUnlock()
 	if sf {
 		wait := p.errorBackoff.Duration()
-		p.Warn("server spawn waiting due to prior failures", "wait", wait)
+		clog.Warn(ctx, "server spawn waiting due to prior failures", "wait", wait)
 		time.Sleep(wait)
 	}
 
@@ -851,7 +850,8 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 	if server != nil {
 		serverID = server.ID
 	}
-	p.Debug("server create attempted", "took", time.Since(t), "id", serverID, "worked", err == nil)
+
+	clog.Debug(ctx, "server create attempted", "took", time.Since(t), "id", serverID, "worked", err == nil)
 
 	usingQuotaCh <- true
 
@@ -866,7 +866,7 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 	// doesn't always work, so we roll our own
 	waitForActive := make(chan error)
 	go func() {
-		defer internal.LogPanic(p.Logger, "spawn", false)
+		defer internal.LogPanic(ctx, "spawn", false)
 
 		var timeoutS float64
 		var typical int
@@ -901,7 +901,7 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 				}
 				if current.Status == "ACTIVE" {
 					ticker.Stop()
-					p.Debug("server became ACTIVE", "id", serverID, "took", time.Since(start), "polls", attempts)
+					clog.Debug(ctx, "server became ACTIVE", "id", serverID, "took", time.Since(start), "polls", attempts)
 					spawnSecs := time.Since(start).Seconds()
 					p.stMutex.Lock()
 					if createdVolume {
@@ -965,9 +965,9 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 		// give it a floating ip
 		floatingIP, errf := p.getAvailableFloatingIP()
 		if errf != nil {
-			errd := p.destroyServer(serverID)
+			errd := p.destroyServer(ctx, serverID)
 			if errd != nil {
-				p.Warn("server destruction after no IP failed", "server", serverID, "err", errd)
+				clog.Warn(ctx, "server destruction after no IP failed", "server", serverID, "err", errd)
 			}
 			return serverID, serverIP, serverName, adminPass, errf
 		}
@@ -978,9 +978,9 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 			FloatingIP: floatingIP,
 		}).ExtractErr()
 		if errf != nil {
-			errd := p.destroyServer(serverID)
+			errd := p.destroyServer(ctx, serverID)
 			if errd != nil {
-				p.Warn("server destruction after not associating IP failed", "server", serverID, "err", errd)
+				clog.Warn(ctx, "server destruction after not associating IP failed", "server", serverID, "err", errd)
 			}
 			return serverID, serverIP, serverName, adminPass, errf
 		}
@@ -990,9 +990,9 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 		var errg error
 		serverIP, errg = p.getServerIP(serverID)
 		if errg != nil {
-			errd := p.destroyServer(serverID)
+			errd := p.destroyServer(ctx, serverID)
 			if errd != nil {
-				p.Warn("server destruction after not finding ip", "server", serverID, "err", errd)
+				clog.Warn(ctx, "server destruction after not finding ip", "server", serverID, "err", errd)
 			}
 			return serverID, serverIP, serverName, adminPass, errg
 		}
@@ -1013,7 +1013,7 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 
 			port, errC := ports.Create(p.networkClient, portCreateOtps).Extract()
 			if errC != nil {
-				p.Warn("failed to create port", "err", errC, "network", network.UUID)
+				clog.Warn(ctx, "failed to create port", "err", errC, "network", network.UUID)
 
 				continue
 			}
@@ -1024,11 +1024,11 @@ func (p *openstackp) spawn(resources *Resources, osPrefix string, flavorID strin
 			}
 			_, errC = attachinterfaces.Create(p.computeClient, serverID, attachOpts).Extract()
 			if errC != nil {
-				p.Warn("failed to attach port", "err", errC, "network", network.UUID, "port", port.ID, "server", serverID)
+				clog.Warn(ctx, "failed to attach port", "err", errC, "network", network.UUID, "port", port.ID, "server", serverID)
 
 				continue
 			} else {
-				p.Debug("attached port for extra network", "server", serverID, "network", network.UUID, "port", port.ID)
+				clog.Debug(ctx, "attached port for extra network", "server", serverID, "network", network.UUID, "port", port.ID)
 			}
 		}
 	}
@@ -1095,7 +1095,7 @@ func (p *openstackp) serverIsKnown(serverID string) (bool, error) {
 }
 
 // destroyServer achieves the aims of DestroyServer().
-func (p *openstackp) destroyServer(serverID string) error {
+func (p *openstackp) destroyServer(ctx context.Context, serverID string) error {
 	err := servers.Delete(p.computeClient, serverID).ExtractErr()
 	if err != nil {
 		if err.Error() == "Resource not found" {
@@ -1153,7 +1153,7 @@ WAIT:
 		for _, uuid := range createdPorts {
 			errP := ports.Delete(p.networkClient, uuid).ExtractErr()
 			if errP != nil {
-				p.Warn("failed to delete a port", "id", uuid, "server", serverID)
+				clog.Warn(ctx, "failed to delete a port", "id", uuid, "server", serverID)
 			}
 		}
 		delete(p.createdPorts, serverID)
@@ -1163,7 +1163,7 @@ WAIT:
 }
 
 // tearDown achieves the aims of TearDown()
-func (p *openstackp) tearDown(resources *Resources) error {
+func (p *openstackp) tearDown(ctx context.Context, resources *Resources) error {
 	// throughout we'll ignore errors because we want to try and delete
 	// as much as possible; we'll end up returning a concatenation of all of
 	// them though
@@ -1195,15 +1195,15 @@ func (p *openstackp) tearDown(resources *Resources) error {
 		wgk := wg.Add(len(toDestroy))
 		for _, sid := range toDestroy {
 			go func(id string) {
-				defer internal.LogPanic(p.Logger, "cloud openstack tearDown destroyServer", false)
+				defer internal.LogPanic(ctx, "cloud openstack tearDown destroyServer", false)
 				defer wg.Done(wgk)
 
 				t := time.Now()
-				errd := p.destroyServer(id)
-				p.Debug("delete server", "time", time.Since(t), "id", id)
+				errd := p.destroyServer(ctx, id)
+				clog.Debug(ctx, "delete server", "time", time.Since(t), "id", id)
 				if errd != nil {
 					// ignore errors, just try to delete others
-					p.Warn("server destruction during teardown failed", "server", id, "err", errd)
+					clog.Warn(ctx, "server destruction during teardown failed", "server", id, "err", errd)
 				}
 			}(sid)
 		}
@@ -1221,7 +1221,8 @@ func (p *openstackp) tearDown(resources *Resources) error {
 				for {
 					t := time.Now()
 					_, errr := routers.RemoveInterface(p.networkClient, id, routers.RemoveInterfaceOpts{SubnetID: subnetid}).Extract()
-					p.Debug("remove router interface", "time", time.Since(t), "routerid", id, "subnetid", subnetid, "err", errr)
+					clog.Debug(ctx, "remove router interface", "time", time.Since(t), "routerid",
+						id, "subnetid", subnetid, "err", errr)
 					if errr != nil {
 						tries++
 						if tries >= 10 {
@@ -1236,7 +1237,7 @@ func (p *openstackp) tearDown(resources *Resources) error {
 			}
 			t := time.Now()
 			err := routers.Delete(p.networkClient, id).ExtractErr()
-			p.Debug("delete router", "time", time.Since(t), "id", id, "err", err)
+			clog.Debug(ctx, "delete router", "time", time.Since(t), "id", id, "err", err)
 			if err == nil {
 				didSomething = true
 			}
@@ -1247,7 +1248,7 @@ func (p *openstackp) tearDown(resources *Resources) error {
 		if id := resources.Details["network"]; id != "" {
 			t := time.Now()
 			err := networks.Delete(p.networkClient, id).ExtractErr()
-			p.Debug("delete network (auto-deletes subnet)", "time", time.Since(t), "id", id, "err", err)
+			clog.Debug(ctx, "delete network (auto-deletes subnet)", "time", time.Since(t), "id", id, "err", err)
 			if err == nil {
 				didSomething = true
 			}
@@ -1258,7 +1259,7 @@ func (p *openstackp) tearDown(resources *Resources) error {
 		if id := resources.Details["secgroup"]; id != "" {
 			t := time.Now()
 			err := secgroups.Delete(p.computeClient, id).ExtractErr()
-			p.Debug("delete security group", "time", time.Since(t), "id", id, "err", err)
+			clog.Debug(ctx, "delete security group", "time", time.Since(t), "id", id, "err", err)
 			if err == nil {
 				didSomething = true
 			}
@@ -1274,7 +1275,7 @@ func (p *openstackp) tearDown(resources *Resources) error {
 		if p.createdKeyPair || p.ownName == "" || (p.securityGroup != "" && p.securityGroup != id) {
 			t := time.Now()
 			err := keypairs.Delete(p.computeClient, id).ExtractErr()
-			p.Debug("delete keypair", "time", time.Since(t), "id", id, "err", err)
+			clog.Debug(ctx, "delete keypair", "time", time.Since(t), "id", id, "err", err)
 			// keypairs are not credential-specific enough, so we don't consider
 			// deleting one as didSomething
 			merr = p.combineError(merr, err)

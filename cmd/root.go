@@ -1,4 +1,4 @@
-// Copyright © 2016-2018 Genome Research Limited
+// Copyright © 2016-2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -21,6 +21,7 @@ package cmd
 // this is the cobra file that enables subcommands and handles command-line args
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"syscall"
@@ -28,10 +29,9 @@ import (
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/jobqueue"
-	"github.com/inconshreveable/log15"
-	"github.com/sb10/l15h"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 // maxCloudResourceUsernameLength is the maximum length that cloud username can
@@ -41,12 +41,9 @@ import (
 // length 36 and a prefix length 1, leaving 18 characters for the username.
 const maxCloudResourceUsernameLength = 18
 
-// appLogger is used for logging events in our commands
-var appLogger = log15.New()
-
 // these variables are accessible by all subcommands.
 var deployment string
-var config internal.Config
+var config *internal.Config
 
 // these are shared by some of the subcommands.
 var addr string
@@ -99,18 +96,21 @@ func ExecuteLSF(cmd string) {
 }
 
 func init() {
+	ctx := context.Background()
 	// set up logging to stderr
-	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
+	clog.ToDefaultAtLevel("info")
 
 	// global flags
-	RootCmd.PersistentFlags().StringVar(&deployment, "deployment", internal.DefaultDeployment(appLogger), "use production or development config")
+	RootCmd.PersistentFlags().StringVar(&deployment, "deployment", internal.DefaultDeployment(ctx),
+		"use production or development config")
 
 	cobra.OnInitialize(initConfig)
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	config = internal.ConfigLoad(deployment, false, appLogger)
+	ctx := context.Background()
+	config = internal.ConfigLoadFromCurrentDir(ctx, deployment)
 	addr = config.ManagerHost + ":" + config.ManagerPort
 	caFile = config.ManagerCAFile
 }
@@ -152,17 +152,20 @@ func cloudResourceName(username string) string {
 
 // info is a convenience to log a message at the Info level.
 func info(msg string, a ...interface{}) {
-	appLogger.Info(fmt.Sprintf(msg, a...))
+	ctx := context.Background()
+	clog.Info(ctx, fmt.Sprintf(msg, a...))
 }
 
 // warn is a convenience to log a message at the Warn level.
 func warn(msg string, a ...interface{}) {
-	appLogger.Warn(fmt.Sprintf(msg, a...))
+	ctx := context.Background()
+	clog.Warn(ctx, fmt.Sprintf(msg, a...))
 }
 
 // die is a convenience to log a message at the Error level and exit non zero.
 func die(msg string, a ...interface{}) {
-	appLogger.Error(fmt.Sprintf(msg, a...))
+	ctx := context.Background()
+	clog.Error(ctx, fmt.Sprintf(msg, a...))
 	os.Exit(1)
 }
 
@@ -298,18 +301,4 @@ func connect(wait time.Duration, expectedToBeDown ...bool) *jobqueue.Client {
 		die("%s", err)
 	}
 	return jq
-}
-
-// setupLogging is a function to provide a new logger who's logging depends on
-// debug.
-func setupLogging(debug bool) log15.Logger {
-	// Set up logging for both commands
-	// for debug purposes, set up logging to STDERR
-	myLogger := log15.New()
-	logLevel := log15.LvlWarn
-	if debug {
-		logLevel = log15.LvlDebug
-	}
-	myLogger.SetHandler(log15.LvlFilterHandler(logLevel, l15h.CallerInfoHandler(log15.StderrHandler)))
-	return myLogger
 }

@@ -1,4 +1,4 @@
-// Copyright © 2017-2019 Genome Research Limited
+// Copyright © 2017-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -23,6 +23,7 @@ package jobqueue
 // with the job queue using JSON over HTTP.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ import (
 	"github.com/VertebrateResequencing/wr/internal"
 	jqs "github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	"github.com/ugorji/go/codec"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 const (
@@ -513,9 +515,9 @@ func (s *Server) httpAuthorized(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // restJobs lets you do CRUD on jobs in the queue.
-func restJobs(s *Server) http.HandlerFunc {
+func restJobs(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue web server restJobs", false)
+		defer internal.LogPanic(ctx, "jobqueue web server restJobs", false)
 
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -528,11 +530,11 @@ func restJobs(s *Server) http.HandlerFunc {
 		var err error
 		switch r.Method {
 		case http.MethodGet:
-			jobs, status, err = restJobsStatus(r, s)
+			jobs, status, err = restJobsStatus(ctx, r, s)
 		case http.MethodPost:
-			jobs, status, err = restJobsAdd(r, s)
+			jobs, status, err = restJobsAdd(ctx, r, s)
 		case http.MethodDelete:
-			jobs, status, err = restJobsCancel(r, s)
+			jobs, status, err = restJobsCancel(ctx, r, s)
 		default:
 			http.Error(w, "So far only GET, POST and DELETE are supported", http.StatusBadRequest)
 			return
@@ -560,7 +562,7 @@ func restJobs(s *Server) http.HandlerFunc {
 		encoder.SetEscapeHTML(false)
 		erre := encoder.Encode(jstati)
 		if erre != nil {
-			s.Warn("restJobs failed to encode job statuses", "err", erre)
+			clog.Warn(ctx, "restJobs failed to encode job statuses", "err", erre)
 		}
 	}
 }
@@ -572,7 +574,7 @@ func restJobs(s *Server) http.HandlerFunc {
 // delayed|ready|reserved|running|lost|buried|dependent|complete|deletable),
 // where deletable == !(running|complete). Returns the Jobs, a http.Status*
 // value and error.
-func restJobsStatus(r *http.Request, s *Server) ([]*Job, int, error) {
+func restJobsStatus(ctx context.Context, r *http.Request, s *Server) ([]*Job, int, error) {
 	// handle possible ?query parameters
 	var search, getStd, getEnv bool
 	var limit int
@@ -624,7 +626,7 @@ func restJobsStatus(r *http.Request, s *Server) ([]*Job, int, error) {
 		for _, id := range strings.Split(ids, ",") {
 			if len(id) == 32 {
 				// id might be a Job.key()
-				theseJobs, _, qerr := s.getJobsByKeys([]string{id}, getStd, getEnv)
+				theseJobs, _, qerr := s.getJobsByKeys(ctx, []string{id}, getStd, getEnv)
 				if qerr == "" && len(theseJobs) > 0 {
 					jobs = append(jobs, theseJobs...)
 					continue
@@ -632,7 +634,7 @@ func restJobsStatus(r *http.Request, s *Server) ([]*Job, int, error) {
 			}
 
 			// id might be a Job.RepGroup
-			theseJobs, _, qerr := s.getJobsByRepGroup(id, search, limit, state, getStd, getEnv)
+			theseJobs, _, qerr := s.getJobsByRepGroup(ctx, id, search, limit, state, getStd, getEnv)
 			if qerr != "" {
 				return nil, http.StatusInternalServerError, fmt.Errorf(qerr)
 			}
@@ -644,7 +646,7 @@ func restJobsStatus(r *http.Request, s *Server) ([]*Job, int, error) {
 	}
 
 	// get all current jobs
-	return s.getJobsCurrent(limit, state, getStd, getEnv), http.StatusOK, err
+	return s.getJobsCurrent(ctx, limit, state, getStd, getEnv), http.StatusOK, err
 }
 
 // restJobsAdd creates and adds jobs to the queue and returns them on success.
@@ -657,7 +659,7 @@ func restJobsStatus(r *http.Request, s *Server) ([]*Job, int, error) {
 // should be supplied as url query escaped JSON strings.
 //
 // The returned int is a http.Status* variable.
-func restJobsAdd(r *http.Request, s *Server) ([]*Job, int, error) {
+func restJobsAdd(ctx context.Context, r *http.Request, s *Server) ([]*Job, int, error) {
 	// handle possible ?query parameters
 	_, diskSet := r.Form["disk"]
 	jd := &JobDefaults{
@@ -780,13 +782,13 @@ func restJobsAdd(r *http.Request, s *Server) ([]*Job, int, error) {
 		return nil, http.StatusInternalServerError, err
 	}
 
-	_, _, _, _, err = s.createJobs(inputJobs, envkey, !rerun)
+	_, _, _, _, err = s.createJobs(ctx, inputJobs, envkey, !rerun)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 
 	// see which of the inputJobs are now actually in the queue
-	jobs := s.inputToQueuedJobs(inputJobs)
+	jobs := s.inputToQueuedJobs(ctx, inputJobs)
 
 	return jobs, http.StatusCreated, err
 }
@@ -796,7 +798,7 @@ func restJobsAdd(r *http.Request, s *Server) ([]*Job, int, error) {
 // restJobsStatus(). However state must be specified, and only one of:
 // (running|lost|deletable) are allowed. Returns the affected Jobs, a
 // http.Status* value and error.
-func restJobsCancel(r *http.Request, s *Server) ([]*Job, int, error) {
+func restJobsCancel(ctx context.Context, r *http.Request, s *Server) ([]*Job, int, error) {
 	var state JobState
 	if r.Form.Get("state") != "" {
 		switch r.Form.Get("state") {
@@ -812,7 +814,7 @@ func restJobsCancel(r *http.Request, s *Server) ([]*Job, int, error) {
 		return nil, http.StatusBadRequest, fmt.Errorf("state must be supplied as one of running|lost|deletable")
 	}
 
-	jobs, status, err := restJobsStatus(r, s)
+	jobs, status, err := restJobsStatus(ctx, r, s)
 	if err != nil || status != http.StatusOK {
 		return nil, status, err
 	}
@@ -825,7 +827,7 @@ func restJobsCancel(r *http.Request, s *Server) ([]*Job, int, error) {
 		for i, job := range jobs {
 			keys[i] = job.Key()
 		}
-		deleted := s.deleteJobs(keys)
+		deleted := s.deleteJobs(ctx, keys)
 		d := make(map[string]bool, len(deleted))
 		for _, key := range deleted {
 			d[key] = true
@@ -838,7 +840,7 @@ func restJobsCancel(r *http.Request, s *Server) ([]*Job, int, error) {
 		}
 	} else {
 		for _, job := range jobs {
-			k, err := s.killJob(job.Key())
+			k, err := s.killJob(ctx, job.Key())
 			if err != nil {
 				return handled, http.StatusInternalServerError, err
 			}
@@ -852,9 +854,9 @@ func restJobsCancel(r *http.Request, s *Server) ([]*Job, int, error) {
 
 // restWarnings lets you read warnings from the scheduler, and auto-"dismisses"
 // (deletes) them.
-func restWarnings(s *Server) http.HandlerFunc {
+func restWarnings(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue web server restWarnings", false)
+		defer internal.LogPanic(ctx, "jobqueue web server restWarnings", false)
 
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -883,7 +885,7 @@ func restWarnings(s *Server) http.HandlerFunc {
 		encoder.SetEscapeHTML(false)
 		erre := encoder.Encode(sis)
 		if erre != nil {
-			s.Warn("restWarnings failed to encode scheduler issues", "err", erre)
+			clog.Warn(ctx, "restWarnings failed to encode scheduler issues", "err", erre)
 		}
 	}
 }
@@ -891,9 +893,9 @@ func restWarnings(s *Server) http.HandlerFunc {
 // restBadServers lets you do CRUD on cloud servers that have gone bad. The
 // DELETE verb has a required 'id' parameter, being the ID of a server you wish
 // to confirm as bad and have terminated if it still exists.
-func restBadServers(s *Server) http.HandlerFunc {
+func restBadServers(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue web server restBadServers", false)
+		defer internal.LogPanic(ctx, "jobqueue web server restBadServers", false)
 
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -913,7 +915,7 @@ func restBadServers(s *Server) http.HandlerFunc {
 			encoder.SetEscapeHTML(false)
 			erre := encoder.Encode(servers)
 			if erre != nil {
-				s.Warn("restBadServers failed to encode servers", "err", erre)
+				clog.Warn(ctx, "restBadServers failed to encode servers", "err", erre)
 			}
 			return
 		case http.MethodDelete:
@@ -931,7 +933,7 @@ func restBadServers(s *Server) http.HandlerFunc {
 				return
 			}
 			if server.IsBad() {
-				err := server.Destroy()
+				err := server.Destroy(ctx)
 				if err != nil {
 					http.Error(w, fmt.Sprintf("Server was bad but could not be destroyed: %s", err), http.StatusNotModified)
 					return
@@ -948,9 +950,9 @@ func restBadServers(s *Server) http.HandlerFunc {
 
 // restFileUpload lets you upload files from a client to the server. The only
 // method supported is PUT.
-func restFileUpload(s *Server) http.HandlerFunc {
+func restFileUpload(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue web server restFileUpload", false)
+		defer internal.LogPanic(ctx, "jobqueue web server restFileUpload", false)
 
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -962,7 +964,7 @@ func restFileUpload(s *Server) http.HandlerFunc {
 			return
 		}
 
-		savePath, err := s.uploadFile(r.Body, r.Form.Get("path"))
+		savePath, err := s.uploadFile(ctx, r.Body, r.Form.Get("path"))
 		if err != nil {
 			http.Error(w, "file upload failed", http.StatusInternalServerError)
 			return
@@ -976,15 +978,15 @@ func restFileUpload(s *Server) http.HandlerFunc {
 		msg["path"] = savePath
 		err = encoder.Encode(msg)
 		if err != nil {
-			s.Warn("restFileUpload failed to encode success msg", "err", err)
+			clog.Warn(ctx, "restFileUpload failed to encode success msg", "err", err)
 		}
 	}
 }
 
 // restInfo lets you get info on self.
-func restInfo(s *Server) http.HandlerFunc {
+func restInfo(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue server status", false)
+		defer internal.LogPanic(ctx, "jobqueue server status", false)
 
 		ok := s.httpAuthorized(w, r)
 		if !ok {
@@ -1002,7 +1004,7 @@ func restInfo(s *Server) http.HandlerFunc {
 		encoder.SetEscapeHTML(false)
 		err := encoder.Encode(s.ServerInfo)
 		if err != nil {
-			s.Warn("restInfo failed to encode ServerInfo", "err", err)
+			clog.Warn(ctx, "restInfo failed to encode ServerInfo", "err", err)
 		}
 	}
 }
@@ -1010,9 +1012,9 @@ func restInfo(s *Server) http.HandlerFunc {
 // restVersion lets you get info on the version of the server and the supported
 // API version (we only support 1 API version at a time). This is the only
 // end point that doesn't need authentication.
-func restVersion(s *Server) http.HandlerFunc {
+func restVersion(ctx context.Context, s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer internal.LogPanic(s.Logger, "jobqueue server version", false)
+		defer internal.LogPanic(ctx, "jobqueue server version", false)
 
 		if r.Method != http.MethodGet {
 			http.Error(w, "Only GET is supported", http.StatusBadRequest)
@@ -1025,7 +1027,7 @@ func restVersion(s *Server) http.HandlerFunc {
 		encoder.SetEscapeHTML(false)
 		err := encoder.Encode(s.ServerVersions)
 		if err != nil {
-			s.Warn("restVersion failed to encode ServerVersions", "err", err)
+			clog.Warn(ctx, "restVersion failed to encode ServerVersions", "err", err)
 		}
 	}
 }

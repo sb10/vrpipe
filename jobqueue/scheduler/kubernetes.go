@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,10 +163,12 @@ func (c *ConfigKubernetes) GetServerKeepTime() time.Duration {
 
 // Set up prerequisites, call Run() Create channels to pass requests to the
 // controller. Create queue.
-func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
+func (s *k8s) initialize(ctx context.Context, config interface{}) error {
 	s.config = config.(*ConfigKubernetes)
 
+	var logger log15.Logger
 	s.Logger = logger.New("scheduler", "kubernetes")
+
 	kubeLogFile := filepath.Join(s.config.ManagerDir, kubeSchedulerLog)
 	fh, err := log15.FileHandler(kubeLogFile, log15.LogfmtFormat())
 	if err != nil {
@@ -177,7 +180,7 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 	s.Debug("configuration passed", "configuration", s.config)
 
 	// make queue
-	s.queue = queue.New(localPlace, s.Logger)
+	s.queue = queue.New(ctx, localPlace)
 	s.running = make(map[string]int)
 
 	// set our functions for use in schedule() and processQueue()
@@ -199,7 +202,6 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 
 	// pass through our shell config and logger to our local embed
 	s.local.config = &ConfigLocal{Shell: s.config.Shell}
-	s.local.Logger = s.Logger
 
 	// Create the default PostCreationScript if no config map passed. If the
 	// byte stream does not stringify things may go horribly wrong.
@@ -232,13 +234,13 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 
 	// Prerequisites to start the controller
 	s.libclient = &client.Kubernetesp{}
-	kubeClient, restConfig, err := s.libclient.Authenticate(client.AuthConfig{}) // Authenticate against the cluster.
+	kubeClient, restConfig, err := s.libclient.Authenticate(ctx, client.AuthConfig{}) // Authenticate against the cluster.
 	if err != nil {
 		return err
 	}
 
 	// Initialise all internal clients on the provided namespace
-	err = s.libclient.Initialize(kubeClient, s.config.Namespace)
+	err = s.libclient.Initialize(ctx, kubeClient, s.config.Namespace)
 	if err != nil {
 		s.Crit("failed to initialise the internal clients to namespace", "namespace", s.config.Namespace, "error", err)
 		return err
@@ -262,7 +264,6 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 		BadCbChan:    s.badCallBackChan,
 		ReqChan:      s.reqChan,
 		PodAliveChan: s.podAliveChan,
-		Logger:       logger,
 		ManagerDir:   s.config.ManagerDir,
 	}
 
@@ -280,7 +281,7 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 	// Start the scheduling controller
 	s.Debug("Starting scheduling controller")
 	go func() {
-		if err = controller.Run(2, s.stopCh); err != nil {
+		if err = controller.Run(ctx, 2, s.stopCh); err != nil {
 			s.Error("Error running controller", "error", err.Error())
 		}
 	}()
@@ -294,7 +295,7 @@ func (s *k8s) initialize(config interface{}, logger log15.Logger) error {
 // TODO: OCC if error: What if a node is added shortly after? (Deals with
 // autoscaling?)
 // https://godoc.org/k8s.io/apimachinery/pkg/util/wait#ExponentialBackoff
-func (s *k8s) reqCheck(req *Requirements) error {
+func (s *k8s) reqCheck(ctx context.Context, req *Requirements) error {
 	s.Debug("reqCheck called with requirements", "requirements", req)
 
 	cores, ram, disk := s.generateResourceRequests(req)
@@ -332,7 +333,7 @@ func (s *k8s) reqCheck(req *Requirements) error {
 }
 
 // setMessageCallBack sets the given callback function.
-func (s *k8s) setMessageCallBack(cb MessageCallBack) {
+func (s *k8s) setMessageCallBack(ctx context.Context, cb MessageCallBack) {
 	s.Debug("setMessageCallBack called")
 	s.cbmutex.Lock()
 	defer s.cbmutex.Unlock()
@@ -340,7 +341,7 @@ func (s *k8s) setMessageCallBack(cb MessageCallBack) {
 }
 
 // setBadServerCallBack sets the given callback function.
-func (s *k8s) setBadServerCallBack(cb BadServerCallBack) {
+func (s *k8s) setBadServerCallBack(ctx context.Context, cb BadServerCallBack) {
 	s.Debug("setBadServerCallBack called")
 	s.cbmutex.Lock()
 	defer s.cbmutex.Unlock()
@@ -368,7 +369,7 @@ func (s *k8s) notifyCallBack(callBackChan chan string, badCallBackChan chan *clo
 }
 
 // cleanup destroys the local queue and stops the scheduler controller.
-func (s *k8s) cleanup() {
+func (s *k8s) cleanup(ctx context.Context) {
 	s.Debug("cleanup() Called")
 
 	s.mutex.Lock()
@@ -392,7 +393,7 @@ func (s *k8s) cleanup() {
 // 100. ToDO: If any job is pending with the given requirements, return 0 until
 // that pend fails. This should reduce overall load on the cluster when adding
 // lots of jobs at once.
-func (s *k8s) canCount(cmd string, req *Requirements, call string) int {
+func (s *k8s) canCount(ctx context.Context, cmd string, req *Requirements, call string) int {
 	s.Debug("canCount Called, returning 100")
 	// 100 is  a big enough block for anyone...
 	return 100
@@ -400,11 +401,11 @@ func (s *k8s) canCount(cmd string, req *Requirements, call string) int {
 
 // cant is our cantFunc, which in this case does nothing, since we can't
 // increase available resources.
-func (s *k8s) cant(desired int, cmd string, req *Requirements, call string) {}
+func (s *k8s) cant(ctx context.Context, desired int, cmd string, req *Requirements, call string) {}
 
 // RunFunc calls spawn() and exits with an error = nil when pod has terminated
 // (Runner exited). Or an error if there was a problem.
-func (s *k8s) runCmd(cmd string, req *Requirements, reservedCh chan bool, call string) error {
+func (s *k8s) runCmd(ctx context.Context, cmd string, req *Requirements, reservedCh chan bool) error {
 	s.Debug("RunCmd Called", "cmd", cmd, "requirements", req)
 	// The first 'argument' to cmd will be the absolute path to the manager's
 	// executable. Work out the local binary's name from localBinaryPath.
@@ -452,7 +453,7 @@ func (s *k8s) runCmd(cmd string, req *Requirements, reservedCh chan bool, call s
 	//DEBUG: binaryArgs = []string{"tail", "-f", "/dev/null"}
 
 	s.Debug("Spawning pod with requirements", "requirements", resources)
-	pod, err := s.libclient.Spawn(containerImage,
+	pod, err := s.libclient.Spawn(ctx, containerImage,
 		s.config.TempMountPath,
 		configMountPath+"/"+scriptName,
 		binaryArgs,
@@ -500,7 +501,7 @@ func (s *k8s) runCmd(cmd string, req *Requirements, reservedCh chan bool, call s
 	}
 	// Delete terminated pod if no error thrown.
 	s.Debug("Deleting pod", "pod", pod.ObjectMeta.Name)
-	err = s.libclient.DestroyPod(pod.ObjectMeta.Name)
+	err = s.libclient.DestroyPod(ctx, pod.ObjectMeta.Name)
 	s.Debug("Returning at end of runCmd()")
 
 	return err
@@ -701,6 +702,6 @@ func (s *k8s) getHost(host string) (Host, bool) {
 
 // recover achieves the aims of Recover(). We don't have to do anything, since
 // when the cmd finishes running, Kubernetes itself will clean up.
-func (s *k8s) recover(cmd string, req *Requirements, host *RecoveredHostDetails) error {
+func (s *k8s) recover(ctx context.Context, cmd string, req *Requirements, host *RecoveredHostDetails) error {
 	return nil
 }

@@ -1,4 +1,4 @@
-// Copyright © 2017, 2018 Genome Research Limited
+// Copyright © 2017, 2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -60,15 +60,15 @@ func TestREST(t *testing.T) {
 
 	// load our config to know where our development manager port is supposed to
 	// be; we'll use that to test jobqueue
-	config := internal.ConfigLoad("development", true, testLogger)
+	config := internal.ConfigLoadFromParentDir(ctx, internal.Development)
 	serverConfig := ServerConfig{
 		Port:            config.ManagerPort,
 		WebPort:         config.ManagerWeb,
 		SchedulerName:   "local",
 		SchedulerConfig: &jqs.ConfigLocal{Shell: config.RunnerExecShell},
 		UploadDir:       uploadsDir,
-		DBFile:          config.ManagerDbFile,
-		DBFileBackup:    config.ManagerDbFile + "_bk",
+		DBFile:          config.ManagerDBFile,
+		DBFileBackup:    config.ManagerDBFile + "_bk",
 		CAFile:          config.ManagerCAFile,
 		CertFile:        config.ManagerCertFile,
 		CertDomain:      config.ManagerCertDomain,
@@ -95,7 +95,7 @@ func TestREST(t *testing.T) {
 	var server *Server
 	var token []byte
 	Convey("Once the jobqueue server is up", t, func() {
-		server, _, token, errt = Serve(serverConfig)
+		server, _, token, errt = Serve(ctx, serverConfig)
 		So(errt, ShouldBeNil)
 
 		bearer := "Bearer " + string(token)
@@ -789,11 +789,11 @@ func TestREST(t *testing.T) {
 		})
 
 		Reset(func() {
-			server.Stop(true)
+			server.Stop(ctx, true)
 		})
 	})
 
 	if server != nil {
-		server.Stop(true)
+		server.Stop(ctx, true)
 	}
 }

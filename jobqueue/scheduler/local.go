@@ -1,4 +1,4 @@
-// Copyright © 2016-2020 Genome Research Limited
+// Copyright © 2016-2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -35,6 +35,7 @@ import (
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
+	"github.com/wtsi-ssg/wr/clog"
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/VertebrateResequencing/wr/queue"
@@ -58,7 +59,7 @@ var cmdProcessSanitiser = strings.NewReplacer("'", "")
 // to ever run a job with the given resource requirements. (We make use of this
 // in the local struct so that other implementers of scheduleri can embed local,
 // use local's schedule(), but have their own reqChecker implementation.)
-type reqChecker func(req *Requirements) error
+type reqChecker func(ctx context.Context, req *Requirements) error
 
 // maxResourceGetter are functions used by schedule() to see what the maximum of
 // of a resource like memory or time is. (We make use of this in the local
@@ -73,30 +74,30 @@ type maxResourceGetter func() int
 // string. That same string will also be supplied to the cmdRunner function, so
 // you can tie together cmdRunner invocations that are all a result of a
 // particular canCounter call.
-type canCounter func(cmd string, req *Requirements, call string) (canCount int)
+type canCounter func(ctx context.Context, cmd string, req *Requirements, call string) (canCount int)
 
 // cantHandlers are functions used during processQueue() that are called when
 // the canCounter function returns less than the desired number of jobs. They
 // represent an opportunity to try and increase available resources (eg. by
 // creating new servers).
-type cantHandler func(desired int, cmd string, req *Requirements, call string)
+type cantHandler func(ctx context.Context, desired int, cmd string, req *Requirements, call string)
 
 // stateUpdaters are functions used by processQueue() to update any global state
 // that might have become invalid due to changes external to our own actions.
 // (We make use of this in the local struct so that other implementers of
 // scheduleri can embed local, use local's processQueue(), but have their own
 // stateUpdater implementation.)
-type stateUpdater func()
+type stateUpdater func(ctx context.Context)
 
 // cmdRunners are functions used by processQueue() to actually run cmds.
 // (Their reason for being is the same as for canCounters.) The reservedCh
 // should be sent true as soon as resources have been reserved to run the cmd,
 // or sent false if something went wrong before that.
-type cmdRunner func(cmd string, req *Requirements, reservedCh chan bool, call string) error
+type cmdRunner func(ctx context.Context, cmd string, req *Requirements, reservedCh chan bool) error
 
 // postProcessors are functions used by processQueue() to do something after
 // a postProcess() call does work.
-type postProcessor func()
+type postProcessor func(ctx context.Context)
 
 // unneededCmdHandler are functions called when scheduling a cmd or completing
 // the execution of a command, and we no longer need to run more of the cmd.
@@ -104,7 +105,6 @@ type unneededCmdHandler func(cmd string)
 
 // local is our implementer of scheduleri.
 type local struct {
-	log15.Logger
 	config            *ConfigLocal
 	maxRAM            int
 	maxCores          int
@@ -175,10 +175,8 @@ type job struct {
 
 // initialize finds out about the local machine. Compatible with amd64 archs
 // only!
-func (s *local) initialize(config interface{}, logger log15.Logger) error {
+func (s *local) initialize(ctx context.Context, config interface{}) error {
 	s.config = config.(*ConfigLocal)
-	s.Logger = logger.New("scheduler", "local")
-
 	s.maxCores = runtime.NumCPU()
 	if s.config.MaxCores > 0 && s.config.MaxCores < s.maxCores {
 		s.maxCores = s.config.MaxCores
@@ -199,7 +197,7 @@ func (s *local) initialize(config interface{}, logger log15.Logger) error {
 	}
 
 	// make our queue
-	s.queue = queue.New(localPlace, s.Logger)
+	s.queue = queue.New(ctx, localPlace)
 	s.running = make(map[string]int)
 
 	// set our functions for use in schedule() and processQueue()
@@ -228,11 +226,11 @@ func (s *local) initialize(config interface{}, logger log15.Logger) error {
 }
 
 // reserveTimeout achieves the aims of ReserveTimeout().
-func (s *local) reserveTimeout(req *Requirements) int {
+func (s *local) reserveTimeout(ctx context.Context, req *Requirements) int {
 	if val, defined := req.Other["rtimeout"]; defined {
 		timeout, err := strconv.Atoi(val)
 		if err != nil {
-			s.Error("Failed to convert rtimeout to integer", "error", err)
+			clog.Error(ctx, "Failed to convert rtimeout to integer", "error", err)
 			return localReserveTimeout
 		}
 		return timeout
@@ -246,14 +244,14 @@ func (s *local) maxQueueTime(req *Requirements) time.Duration {
 }
 
 // schedule achieves the aims of Schedule().
-func (s *local) schedule(cmd string, req *Requirements, priority uint8, count int) error {
+func (s *local) schedule(ctx context.Context, cmd string, req *Requirements, priority uint8, count int) error {
 	if s.cleanedUp() {
 		return nil
 	}
 
 	// first find out if its at all possible to ever run this cmd
 	if count != 0 {
-		err := s.reqCheckFunc(req)
+		err := s.reqCheckFunc(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -289,7 +287,7 @@ func (s *local) schedule(cmd string, req *Requirements, priority uint8, count in
 		return nil
 	}
 
-	item, err := s.queue.AddWithSize(key, "", data, priority, size, 0*time.Second, 30*time.Second, "") // the ttr just has to be long enough for processQueue() to process a job, not actually run the cmds
+	item, err := s.queue.AddWithSize(ctx, key, "", data, priority, size, 0*time.Second, 30*time.Second, "") // the ttr just has to be long enough for processQueue() to process a job, not actually run the cmds
 	if err != nil {
 		if qerr, ok := err.(queue.Error); ok && qerr.Err == queue.ErrAlreadyExists {
 			// update the job's count and item priority (only)
@@ -306,23 +304,24 @@ func (s *local) schedule(cmd string, req *Requirements, priority uint8, count in
 				j.scheduleDecrements = 0
 			}
 			if j.priority != priority {
-				err = s.queue.Update(key, "", j, priority, 0*time.Second, 30*time.Second)
+				err = s.queue.Update(ctx, key, "", j, priority, 0*time.Second, 30*time.Second)
 				if err != nil {
-					s.Error("failed to update priority", "cmd", cmd, "err", err)
+					clog.Error(ctx, "failed to update priority", "cmd", cmd, "err", err)
 				} else {
-					s.Debug("schedule changed priority", "cmd", cmd, "before", j.priority, "now", priority)
+					clog.Debug(ctx, "schedule changed priority", "cmd", cmd, "before", j.priority, "now", priority)
 					j.priority = priority
 				}
 			}
 			j.Unlock()
 			if count != before {
-				s.Debug("schedule changed number needed", "cmd", cmd, "before", before, "needs", count)
+				clog.Debug(ctx, "schedule changed number needed", "cmd", cmd, "before", before, "needs", count)
 			}
 			if count == 0 {
-				s.removeKey(key)
-				s.Debug("schedule removed cmd", "cmd", cmd)
+				s.removeKey(ctx, key)
+				clog.Debug(ctx, "schedule removed cmd", "cmd", cmd)
 			}
-			if !s.checkNeeded(cmd, key, count, running) {
+
+			if !s.checkNeeded(ctx, cmd, key, count, running) {
 				// bypass a pointless processQueue call
 				s.mutex.Unlock()
 				return nil
@@ -332,20 +331,20 @@ func (s *local) schedule(cmd string, req *Requirements, priority uint8, count in
 			return err
 		}
 	} else {
-		s.Debug("schedule added new cmd", "cmd", cmd, "needs", count, "size", size, "priority", priority)
+		clog.Debug(ctx, "schedule added new cmd", "cmd", cmd, "needs", count, "size", size, "priority", priority)
 	}
 	s.mutex.Unlock()
 
 	if count > 0 {
-		s.startAutoProcessing()
+		s.startAutoProcessing(ctx)
 	}
 
 	// try and run the jobs in the queue
-	return s.processQueue("schedule")
+	return s.processQueue(ctx, "schedule")
 }
 
 // scheduled achieves the aims of Scheduled().
-func (s *local) scheduled(cmd string) (int, error) {
+func (s *local) scheduled(ctx context.Context, cmd string) (int, error) {
 	if s.cleanedUp() {
 		return 0, nil
 	}
@@ -378,9 +377,9 @@ func (s *local) scheduled(cmd string) (int, error) {
 // checkNeeded takes a cmd, item key, current item.Count and number of cmd
 // currently running. If we do not need to run any more of this cmd, calls
 // cmdNotNeededFunc(cmd).
-func (s *local) checkNeeded(cmd, key string, needed, running int) bool {
+func (s *local) checkNeeded(ctx context.Context, cmd, key string, needed, running int) bool {
 	if needed <= running {
-		s.Debug("checkNeeded not needed", "cmd", cmd, "key", key, "needed", needed, "running", running)
+		clog.Debug(ctx, "checkNeeded not needed", "cmd", cmd, "key", key, "needed", needed, "running", running)
 		s.cmdNotNeededFunc(cmd)
 		return false
 	}
@@ -412,7 +411,7 @@ func (s *local) cmdCountRemaining(cmd string) int {
 // recover achieves the aims of Recover(). Here we find an untracked pid
 // corresponding to the given cmd, note that the resources are in use, and
 // start tracking the pid to know when it exits to release those resources.
-func (s *local) recover(cmd string, req *Requirements, host *RecoveredHostDetails) error {
+func (s *local) recover(ctx context.Context, cmd string, req *Requirements, host *RecoveredHostDetails) error {
 	processes, err := process.Processes()
 	if err != nil {
 		return err
@@ -444,7 +443,7 @@ func (s *local) recover(cmd string, req *Requirements, host *RecoveredHostDetail
 			s.resourceMutex.Unlock()
 
 			go func() {
-				defer internal.LogPanic(s.Logger, "recover", true)
+				defer internal.LogPanic(ctx, "recover", true)
 
 				// periodically check on this pid; when it has exited, update
 				// our resource usage
@@ -475,9 +474,9 @@ func (s *local) recover(cmd string, req *Requirements, host *RecoveredHostDetail
 							}
 							s.resourceMutex.Unlock()
 
-							errp := s.processQueue("recover")
+							errp := s.processQueue(ctx, "recover")
 							if errp != nil {
-								s.Error("processQueue call after recovery failed", "err", errp)
+								clog.Error(ctx, "processQueue call after recovery failed", "err", errp)
 							}
 
 							return
@@ -497,7 +496,7 @@ func (s *local) recover(cmd string, req *Requirements, host *RecoveredHostDetail
 }
 
 // reqCheck gives an ErrImpossible if the given Requirements can not be met.
-func (s *local) reqCheck(req *Requirements) error {
+func (s *local) reqCheck(ctx context.Context, req *Requirements) error {
 	if req.RAM > s.maxRAM || int(math.Ceil(req.Cores)) > s.maxCores {
 		return Error{"local", "schedule", ErrImpossible}
 	}
@@ -516,8 +515,8 @@ func (s *local) maxCPU() int {
 
 // removeKey removes a key from the queue, for when there are no more jobs for
 // that key. If this results in an empty queue, stops autoProcessing.
-func (s *local) removeKey(key string) {
-	err := s.queue.Remove(key)
+func (s *local) removeKey(ctx context.Context, key string) {
+	err := s.queue.Remove(ctx, key)
 	if err != nil {
 		qerr, ok := err.(queue.Error)
 
@@ -527,7 +526,7 @@ func (s *local) removeKey(key string) {
 
 		// warn unless we've already removed this key
 		if !ok || qerr.Err != queue.ErrNotFound {
-			s.Warn("processQueue item removal failed", "err", err)
+			clog.Warn(ctx, "processQueue item removal failed", "err", err)
 		}
 	}
 	if s.queue.Stats().Items == 0 {
@@ -538,7 +537,7 @@ func (s *local) removeKey(key string) {
 // processQueue goes through the jobs in the queue by size, sees if it's
 // possible to run any, does so if it is, otherwise returns the jobs to the
 // queue.
-func (s *local) processQueue(reason string) error {
+func (s *local) processQueue(ctx context.Context, reason string) error {
 	// only process the queue once at a time; other calls to this function
 	// will return immeditely but cause us to recall ourselves when we
 	// complete
@@ -554,23 +553,24 @@ func (s *local) processQueue(reason string) error {
 	}
 	s.processing = true
 	s.mutex.Unlock()
-	s.Debug("processQueue starting", "reason", reason)
+	clog.Debug(ctx, "processQueue starting", "reason", reason)
 
 	// now perform any global state update needed by the scheduler
-	s.stateUpdateFunc()
+	s.stateUpdateFunc(ctx)
 
 	stats := s.queue.Stats()
 	toRelease := make([]string, 0, stats.Items)
 	defer func() {
 		for _, key := range toRelease {
-			errr := s.queue.Release(key)
+			errr := s.queue.Release(ctx, key)
 			if errr != nil {
 				if qerr, ok := errr.(queue.Error); !ok || (qerr.Err != queue.ErrNotFound && qerr.Err != queue.ErrQueueClosed) {
-					s.Warn("processQueue item release failed", "err", errr)
+					clog.Warn(ctx, "processQueue item release failed", "err", errr)
 				}
 			}
 		}
-		s.postProcessFunc()
+
+		s.postProcessFunc(ctx)
 
 		s.mutex.Lock()
 		s.processing = false
@@ -579,15 +579,15 @@ func (s *local) processQueue(reason string) error {
 		s.mutex.Unlock()
 		if recall {
 			go func() {
-				defer internal.LogPanic(s.Logger, "processQueue recall", true)
-				errp := s.processQueue("recall")
+				defer internal.LogPanic(ctx, "processQueue recall", true)
+				errp := s.processQueue(ctx, "recall")
 				if errp != nil {
-					s.Warn("processQueue recall failed", "err", errp)
+					clog.Warn(ctx, "processQueue recall failed", "err", errp)
 				}
 			}()
 		}
 
-		s.Debug("processQueue ending")
+		clog.Debug(ctx, "processQueue ending")
 	}()
 
 	// go through the jobs largest to smallest (standard bin packing approach)
@@ -608,12 +608,12 @@ func (s *local) processQueue(reason string) error {
 
 		s.runMutex.Lock()
 		running := s.running[key]
-		s.Debug("processQueue binpacking", "needs", count, "current", running, "cmd", cmd)
+		clog.Debug(ctx, "processQueue binpacking", "needs", count, "current", running, "cmd", cmd)
 		if count == 0 && running == 0 {
 			// a cancellation has come in, and somehow we didn't remove this
 			// from the queue; do so now
-			s.Debug("processQueue cancelling", "cmd", cmd)
-			s.removeKey(key)
+			clog.Debug(ctx, "processQueue cancelling", "cmd", cmd)
+			s.removeKey(ctx, key)
 			s.runMutex.Unlock()
 			j.RUnlock()
 			continue
@@ -630,14 +630,16 @@ func (s *local) processQueue(reason string) error {
 
 		// now see if there's remaining capacity to run the job
 		call := logext.RandId(8)
-		canCount := s.canCountFunc(cmd, req, call)
-		s.Debug("processQueue canCount", "can", canCount, "running", running, "should", shouldCount)
+		ctx = clog.ContextWithCallValue(ctx, call)
+
+		canCount := s.canCountFunc(ctx, cmd, req, call)
+		clog.Debug(ctx, "processQueue canCount", "can", canCount, "running", running, "should", shouldCount)
 		if canCount > shouldCount {
 			canCount = shouldCount
 		}
 
 		if canCount < shouldCount {
-			s.cantFunc(shouldCount-canCount, cmd, req, call)
+			s.cantFunc(ctx, shouldCount-canCount, cmd, req, call)
 		}
 
 		if canCount <= 0 {
@@ -649,18 +651,18 @@ func (s *local) processQueue(reason string) error {
 		}
 
 		// start running what we can
-		s.Debug("processQueue runCmdFunc", "count", canCount)
+		clog.Debug(ctx, "processQueue runCmdFunc", "count", canCount)
 		reserved := make(chan bool, canCount)
 		for i := 0; i < canCount; i++ {
 			s.running[key]++
-			s.checkNeeded(cmd, key, count, s.running[key])
+			s.checkNeeded(ctx, cmd, key, count, s.running[key])
 
 			go func() {
-				defer internal.LogPanic(s.Logger, "processQueue runCmd loop", true)
+				defer internal.LogPanic(ctx, "processQueue runCmd loop", true)
 
-				s.Debug("will run cmd", "cmd", cmd, "call", call)
-				err := s.runCmdFunc(cmd, req, reserved, call)
-				s.Debug("ran cmd", "cmd", cmd, "call", call)
+				clog.Debug(ctx, "will run cmd", "cmd", cmd, "call", call)
+				err := s.runCmdFunc(ctx, cmd, req, reserved)
+				clog.Debug(ctx, "ran cmd", "cmd", cmd, "call", call)
 
 				j.Lock()
 				s.runMutex.Lock()
@@ -679,7 +681,7 @@ func (s *local) processQueue(reason string) error {
 					}
 					jCount := j.count
 					if jCount <= 0 {
-						s.removeKey(key)
+						s.removeKey(ctx, key)
 					}
 				}
 				s.runMutex.Unlock()
@@ -688,19 +690,19 @@ func (s *local) processQueue(reason string) error {
 				if err != nil {
 					// users are notified of relevant errors during runCmd; here
 					// we just debug log everything
-					s.Debug("runCmd error", "err", err)
+					clog.Debug(ctx, "runCmd error", "err", err)
 				}
 
-				err = s.processQueue("after runCmd")
+				err = s.processQueue(ctx, "after runCmd")
 				if err != nil {
-					s.Error("processQueue recall failed", "err", err)
+					clog.Error(ctx, "processQueue recall failed", "err", err)
 				}
 			}()
 		}
 		s.runMutex.Unlock()
 		j.RUnlock()
 
-		s.Debug("processQueue runCmdFunc loop complete")
+		clog.Debug(ctx, "processQueue runCmdFunc loop complete")
 
 		// before looping again, wait for all the above runCmdFuncs to at least
 		// get as far as reserving their resources, so subsequent calls to
@@ -725,7 +727,7 @@ func (s *local) processQueue(reason string) error {
 		}()
 		sentAll := <-ch
 		if !sentAll {
-			s.Warn("processQueue failed to reserve all resources")
+			clog.Warn(ctx, "processQueue failed to reserve all resources")
 		}
 
 		// keep looping, in case any smaller job can also be run
@@ -734,7 +736,7 @@ func (s *local) processQueue(reason string) error {
 
 // canCount tells you how many jobs with the given RAM and core requirements it
 // is possible to run, given remaining resources.
-func (s *local) canCount(cmd string, req *Requirements, call string) int {
+func (s *local) canCount(ctx context.Context, cmd string, req *Requirements, call string) int {
 	s.resourceMutex.RLock()
 	defer s.resourceMutex.RUnlock()
 
@@ -745,7 +747,7 @@ func (s *local) canCount(cmd string, req *Requirements, call string) int {
 	// shouldn't be too much of an issue.
 	canCount := int(math.Floor(float64(s.maxRAM-s.ram) / float64(req.RAM)))
 	if canCount < 0 {
-		s.Warn("negative canCount", "can", canCount, "maxRam", s.maxRAM, "ram", s.ram, "reqRam", req.RAM)
+		clog.Warn(ctx, "negative canCount", "can", canCount, "maxRam", s.maxRAM, "ram", s.ram, "reqRam", req.RAM)
 		canCount = 0
 	}
 	if canCount >= 1 {
@@ -764,7 +766,8 @@ func (s *local) canCount(cmd string, req *Requirements, call string) int {
 		if canCount2 < canCount {
 			canCount = canCount2
 			if canCount < 0 {
-				s.Warn("negative canCount", "can", canCount, "maxCores", s.maxCores, "cores", s.cores, "zeroCores", s.zeroCores, "reqCores", req.Cores)
+				clog.Warn(ctx, "negative canCount", "can", canCount, "maxCores", s.maxCores, "cores",
+					s.cores, "zeroCores", s.zeroCores, "reqCores", req.Cores)
 				canCount = 0
 			}
 		}
@@ -774,13 +777,13 @@ func (s *local) canCount(cmd string, req *Requirements, call string) int {
 
 // cant is our cantFunc, which in the local case does nothing, since we can't
 // increase available resources.
-func (s *local) cant(desired int, cmd string, req *Requirements, call string) {}
+func (s *local) cant(ctx context.Context, desired int, cmd string, req *Requirements, call string) {}
 
 // runCmd runs the command, kills it if it goes much over RAM or time limits.
 // NB: we only return an error if we can't start the cmd, not if the command
 // fails (schedule() only guarantees that the cmds are run count times, not that
 // they run /successful/ that many times).
-func (s *local) runCmd(cmd string, req *Requirements, reservedCh chan bool, call string) error {
+func (s *local) runCmd(ctx context.Context, cmd string, req *Requirements, reservedCh chan bool) error {
 	sr := func(v bool) {
 		// *** reservedCh is buffered and sending on it should never
 		// block, but somehow we have gotten stuck here before; make
@@ -802,7 +805,7 @@ func (s *local) runCmd(cmd string, req *Requirements, reservedCh chan bool, call
 		}()
 		sentReserved := <-ch
 		if !sentReserved {
-			s.Warn("failed to send on reservedCh")
+			clog.Warn(ctx, "failed to send on reservedCh")
 		}
 	}
 
@@ -810,7 +813,7 @@ func (s *local) runCmd(cmd string, req *Requirements, reservedCh chan bool, call
 	ec.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	err := ec.Start()
 	if err != nil {
-		s.Error("runCmd start", "cmd", cmd, "err", err)
+		clog.Error(ctx, "runCmd start", "cmd", cmd, "err", err)
 		sr(false)
 		return err
 	}
@@ -834,7 +837,7 @@ func (s *local) runCmd(cmd string, req *Requirements, reservedCh chan bool, call
 
 	err = ec.Wait()
 	if err != nil {
-		s.Error("runCmd wait", "cmd", cmd, "err", err)
+		clog.Error(ctx, "runCmd wait", "cmd", cmd, "err", err)
 	}
 
 	s.rcMutex.Lock()
@@ -858,11 +861,11 @@ func (s *local) runCmd(cmd string, req *Requirements, reservedCh chan bool, call
 
 // stateUpdate in the local scheduler is a no-op, since there currently isn't
 // any state out of our control we worry about.
-func (s *local) stateUpdate() {}
+func (s *local) stateUpdate(ctx context.Context) {}
 
 // postProcess in the local scheduler is a no-op, since there currently isn't
 // anything that needs to be done after a postProcess() call.
-func (s *local) postProcess() {}
+func (s *local) postProcess(ctx context.Context) {}
 
 // cmdNotNeeded in the local scheduler is a no-op, since there currently isn't
 // anything that needs to be done when a cmd is no longer needed.
@@ -872,7 +875,7 @@ func (s *local) cmdNotNeeded(cmd string) {}
 // processQueue is only called when cmds are added or complete. Calling it
 // periodically as well means we are responsive to external events freeing up
 // resources.
-func (s *local) startAutoProcessing() {
+func (s *local) startAutoProcessing(ctx context.Context) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.cleanedUp() {
@@ -885,7 +888,7 @@ func (s *local) startAutoProcessing() {
 	}
 
 	go func() {
-		defer internal.LogPanic(s.Logger, "auto processQueue", false)
+		defer internal.LogPanic(ctx, "auto processQueue", false)
 
 		ticker := time.NewTicker(s.stateUpdateFreq)
 		for {
@@ -896,9 +899,9 @@ func (s *local) startAutoProcessing() {
 				// it until this case completes, so call processQueue in a go
 				// routine to complete the case ~instantly
 				go func() {
-					err := s.processQueue("auto")
+					err := s.processQueue(ctx, "auto")
 					if err != nil {
-						s.Error("Automated processQueue call failed", "err", err)
+						clog.Error(ctx, "Automated processQueue call failed", "err", err)
 					}
 				}()
 				continue
@@ -928,7 +931,7 @@ func (s *local) stopAutoProcessing() {
 
 // busy returns true if there's anything in our queue or we are still running
 // any cmd.
-func (s *local) busy() bool {
+func (s *local) busy(ctx context.Context) bool {
 	if s.cleanedUp() {
 		return false
 	}
@@ -959,7 +962,7 @@ func (l *localHost) RunCmd(ctx context.Context, cmd string, background bool) (st
 	errCh := make(chan string, 1)
 
 	go func() {
-		defer internal.LogPanic(l.logger, "localHost RunCmd", false)
+		defer internal.LogPanic(ctx, "localHost RunCmd", false)
 
 		if background {
 			cmd = "sh -c 'nohup " + cmd + " > /dev/null 2>&1 &'"
@@ -1021,18 +1024,18 @@ func (l *localHost) RunCmd(ctx context.Context, cmd string, background bool) (st
 // getHost returns an implementation of the Host interface that can be used
 // to run commands on localhost.
 func (s *local) getHost(host string) (Host, bool) {
-	return &localHost{logger: s.Logger, shell: s.config.Shell}, true
+	return &localHost{shell: s.config.Shell}, true
 }
 
 // setMessageCallBack does nothing at the moment, since we don't generate any
 // messages for the user.
-func (s *local) setMessageCallBack(cb MessageCallBack) {}
+func (s *local) setMessageCallBack(ctx context.Context, cb MessageCallBack) {}
 
 // setBadServerCallBack does nothing, since we're not a cloud-based scheduler.
-func (s *local) setBadServerCallBack(cb BadServerCallBack) {}
+func (s *local) setBadServerCallBack(ctx context.Context, cb BadServerCallBack) {}
 
 // cleanup destroys our internal queue.
-func (s *local) cleanup() {
+func (s *local) cleanup(ctx context.Context) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.runMutex.Lock()
@@ -1044,7 +1047,7 @@ func (s *local) cleanup() {
 	s.cleaned = true
 	err := s.queue.Destroy()
 	if err != nil {
-		s.Warn("local scheduler cleanup failed", "err", err)
+		clog.Warn(ctx, "local scheduler cleanup failed", "err", err)
 	}
 }
 

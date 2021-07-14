@@ -1,4 +1,4 @@
-// Copyright © 2016-2020 Genome Research Limited
+// Copyright © 2016-2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -23,6 +23,7 @@ package scheduler
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"fmt"
 	"math"
@@ -37,7 +38,7 @@ import (
 
 	"github.com/VertebrateResequencing/wr/cloud"
 	"github.com/VertebrateResequencing/wr/internal"
-	"github.com/inconshreveable/log15"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 // lsf is our implementer of scheduleri
@@ -54,7 +55,6 @@ type lsf struct {
 	bjobsExe           string
 	bkillExe           string
 	privateKey         string
-	log15.Logger
 }
 
 // ConfigLSF represents the configuration options required by the LSF scheduler.
@@ -73,9 +73,8 @@ type ConfigLSF struct {
 }
 
 // initialize finds out about lsf's hosts and queues
-func (s *lsf) initialize(config interface{}, logger log15.Logger) error {
+func (s *lsf) initialize(ctx context.Context, config interface{}) error {
 	s.config = config.(*ConfigLSF)
-	s.Logger = logger.New("scheduler", "lsf")
 
 	// find the real paths to the main LSF exes, since thanks to wr's LSF
 	// compatibility mode, might not be the first in $PATH
@@ -453,11 +452,11 @@ func (s *lsf) parseBmgroups(groups map[string]map[string]bool) error {
 }
 
 // reserveTimeout achieves the aims of ReserveTimeout().
-func (s *lsf) reserveTimeout(req *Requirements) int {
+func (s *lsf) reserveTimeout(ctx context.Context, req *Requirements) int {
 	if val, defined := req.Other["rtimeout"]; defined {
 		timeout, err := strconv.Atoi(val)
 		if err != nil {
-			s.Logger.Error(fmt.Sprintf("Failed to convert timeout to integer: %s", err))
+			clog.Error(ctx, fmt.Sprintf("Failed to convert timeout to integer: %s", err))
 			return defaultReserveTimeout
 		}
 		return timeout
@@ -477,7 +476,7 @@ func (s *lsf) maxQueueTime(req *Requirements) time.Duration {
 // schedule achieves the aims of Schedule(). Note that if rescheduling a cmd
 // at a lower count, we cannot guarantee that only that number get run; it may
 // end up being a few more.
-func (s *lsf) schedule(cmd string, req *Requirements, priority uint8, count int) error {
+func (s *lsf) schedule(ctx context.Context, cmd string, req *Requirements, priority uint8, count int) error {
 	// use the given queue or find the best queue for these resource
 	// requirements
 	queue, err := s.determineQueue(req, 0)
@@ -488,7 +487,7 @@ func (s *lsf) schedule(cmd string, req *Requirements, priority uint8, count int)
 	// get the details of everything already in the scheduler for this cmd,
 	// removing from the queue anything not currently running when we're over
 	// the desired count
-	scheduledCount, err := s.checkCmd(cmd, count)
+	scheduledCount, err := s.checkCmd(ctx, cmd, count)
 	if err != nil {
 		return err
 	}
@@ -497,7 +496,7 @@ func (s *lsf) schedule(cmd string, req *Requirements, priority uint8, count int)
 		return nil
 	}
 
-	bsubArgs := s.generateBsubArgs(queue, req, cmd, stillNeeded)
+	bsubArgs := s.generateBsubArgs(ctx, queue, req, cmd, stillNeeded)
 
 	// submit to the queue
 	bsubcmd := exec.Command(s.bsubExe, bsubArgs...) // #nosec
@@ -517,7 +516,7 @@ func (s *lsf) schedule(cmd string, req *Requirements, priority uint8, count int)
 	if matches := s.bsubRegex.FindStringSubmatch(string(bsubout)); len(matches) == 2 {
 		ready := make(chan bool, 1)
 		go func() {
-			defer internal.LogPanic(s.Logger, "lsf scheduling", true)
+			defer internal.LogPanic(ctx, "lsf scheduling", true)
 
 			limit := time.After(10 * time.Second)
 			ticker := time.NewTicker(100 * time.Millisecond)
@@ -554,13 +553,13 @@ func (s *lsf) schedule(cmd string, req *Requirements, priority uint8, count int)
 }
 
 // scheduled achieves the aims of Scheduled().
-func (s *lsf) scheduled(cmd string) (int, error) {
-	return s.checkCmd(cmd, -1)
+func (s *lsf) scheduled(ctx context.Context, cmd string) (int, error) {
+	return s.checkCmd(ctx, cmd, -1)
 }
 
 // generateBsubArgs generates the appropriate bsub args for the given req and
 // cmd and queue
-func (s *lsf) generateBsubArgs(queue string, req *Requirements, cmd string, needed int) []string {
+func (s *lsf) generateBsubArgs(ctx context.Context, queue string, req *Requirements, cmd string, needed int) []string {
 	var bsubArgs []string
 	megabytes := req.RAM
 	m := float32(megabytes) * s.memLimitMultiplier
@@ -568,13 +567,13 @@ func (s *lsf) generateBsubArgs(queue string, req *Requirements, cmd string, need
 
 	if val, ok := req.Other["scheduler_misc"]; ok {
 		if strings.Contains(val, `'`) {
-			s.Warn("scheduler misc option ignored due to containing single quotes", "misc", val)
+			clog.Warn(ctx, "scheduler misc option ignored due to containing single quotes", "misc", val)
 		} else {
 			r := csv.NewReader(strings.NewReader(val))
 			r.Comma = ' '
 			fields, err := r.Read()
 			if err != nil {
-				s.Warn("scheduler misc option ignored", "misc", val, "err", err)
+				clog.Warn(ctx, "scheduler misc option ignored", "misc", val, "err", err)
 			} else {
 				for _, field := range fields {
 					if strings.Contains(field, ` `) {
@@ -604,15 +603,15 @@ func (s *lsf) generateBsubArgs(queue string, req *Requirements, cmd string, need
 
 // recover achieves the aims of Recover(). We don't have to do anything, since
 // when the cmd finishes running, LSF itself will clean up.
-func (s *lsf) recover(cmd string, req *Requirements, host *RecoveredHostDetails) error {
+func (s *lsf) recover(ctx context.Context, cmd string, req *Requirements, host *RecoveredHostDetails) error {
 	return nil
 }
 
 // busy returns true if there are any jobs with our jobName() prefix in any
 // queue. It also returns true if the most recently submitted job is pending or
 // running
-func (s *lsf) busy() bool {
-	count, err := s.checkCmd("", -1)
+func (s *lsf) busy(ctx context.Context) bool {
+	count, err := s.checkCmd(ctx, "", -1)
 	if err != nil {
 		// busy() doesn't return an error, so just assume we're busy
 		return true
@@ -663,7 +662,7 @@ func (s *lsf) determineQueue(req *Requirements, globalMax int) (string, error) {
 // is supplied, kills any extraneous non-running jobs for the cmd. If the
 // supplied cmd is the empty string, it will report/act on all cmds submitted
 // by schedule() for this deployment.
-func (s *lsf) checkCmd(cmd string, max int) (count int, err error) {
+func (s *lsf) checkCmd(ctx context.Context, cmd string, max int) (count int, err error) {
 	// bjobs -w does not output a column for both array index and the command.
 	// The LSF related modules on CPAN either just parse the command line output
 	// or don't work. Ideally we'd use the C-API's lsb_readjobinfo call, but we
@@ -716,7 +715,7 @@ func (s *lsf) checkCmd(cmd string, max int) (count int, err error) {
 			killcmd := exec.Command(s.bkillExe, toKill...) // #nosec
 			out, errk := killcmd.CombinedOutput()
 			if errk != nil && !strings.HasPrefix(string(out), "Job has already finished") {
-				s.Warn("checkCmd bkill failed", "cmd", s.bkillExe, "toKill", toKill, "err", errk, "out", string(out))
+				clog.Warn(ctx, "checkCmd bkill failed", "cmd", s.bkillExe, "toKill", toKill, "err", errk, "out", string(out))
 			}
 		}
 	} else {
@@ -780,7 +779,7 @@ func (s *lsf) getHost(host string) (Host, bool) {
 		name = user.Username
 	}
 
-	server := cloud.NewServer(name, host, s.privateKey, s.Logger)
+	server := cloud.NewServer(name, host, s.privateKey)
 	if server == nil {
 		return nil, false
 	}
@@ -790,26 +789,26 @@ func (s *lsf) getHost(host string) (Host, bool) {
 
 // setMessageCallBack does nothing at the moment, since we don't generate any
 // messages for the user.
-func (s *lsf) setMessageCallBack(cb MessageCallBack) {}
+func (s *lsf) setMessageCallBack(ctx context.Context, cb MessageCallBack) {}
 
 // setBadServerCallBack does nothing, since we're not a cloud-based scheduler.
-func (s *lsf) setBadServerCallBack(cb BadServerCallBack) {}
+func (s *lsf) setBadServerCallBack(ctx context.Context, cb BadServerCallBack) {}
 
 // cleanup bkills any remaining jobs we created
-func (s *lsf) cleanup() {
+func (s *lsf) cleanup(ctx context.Context) {
 	toKill := []string{"-b"}
 	cb := func(jobID, stat, jobName string) {
 		toKill = append(toKill, jobID)
 	}
 	err := s.parseBjobs(fmt.Sprintf("wr%s_", s.config.Deployment[0:1]), cb)
 	if err != nil {
-		s.Error("cleaup parse bjobs failed", "err", err)
+		clog.Error(ctx, "cleaup parse bjobs failed", "err", err)
 	}
 	if len(toKill) > 1 {
 		killcmd := exec.Command(s.bkillExe, toKill...) // #nosec
 		err = killcmd.Run()
 		if err != nil {
-			s.Warn("cleanup bkill failed", "err", err)
+			clog.Warn(ctx, "cleanup bkill failed", "err", err)
 		}
 	}
 }

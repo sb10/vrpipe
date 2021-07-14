@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 // This file was based on: Diego Bernardes de Sousa Pinto's
 // https://github.com/diegobernardes/ttlcache
@@ -85,12 +85,12 @@ delay queue.
 package queue
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	sync "github.com/sasha-s/go-deadlock"
-
-	"github.com/inconshreveable/log15"
+	"github.com/wtsi-ssg/wr/clog"
 )
 
 // SubQueue is how we name the sub-queues of a Queue.
@@ -186,7 +186,6 @@ type Queue struct {
 	closed                 bool
 	readyAddedCbRunning    bool
 	readyAddedCbRecall     bool
-	log15.Logger
 }
 
 // Stats holds information about the Queue's state.
@@ -212,21 +211,14 @@ type ItemDef struct {
 }
 
 // New is a helper to create instance of the Queue struct.
-func New(name string, logger ...log15.Logger) *Queue {
-	var l log15.Logger
-	if len(logger) == 1 {
-		l = logger[0].New()
-	} else {
-		l = log15.New()
-		l.SetHandler(log15.DiscardHandler())
-	}
+func New(ctx context.Context, name string) *Queue {
 	queue := &Queue{
 		Name:                   name,
 		items:                  make(map[string]*Item),
 		dependants:             make(map[string]map[string]*Item),
-		delayQueue:             newSubQueue(0, l),
-		readyQueue:             newSubQueue(1, l),
-		runQueue:               newSubQueue(2, l),
+		delayQueue:             newSubQueue(0),
+		readyQueue:             newSubQueue(1),
+		runQueue:               newSubQueue(2),
 		buryQueue:              newBuryQueue(),
 		depQueue:               newDependencyQueue(),
 		ttrNotification:        make(chan bool, 1),
@@ -238,11 +230,10 @@ func New(name string, logger ...log15.Logger) *Queue {
 		delayClose:             make(chan bool, 1),
 		delayTime:              time.Now(),
 		ttrCb:                  defaultTTRCallback,
-		Logger:                 l,
 	}
-	go queue.startDelayProcessing()
+	go queue.startDelayProcessing(ctx)
 	<-queue.startedDelayProcessing
-	go queue.startTTRProcessing()
+	go queue.startTTRProcessing(ctx)
 	<-queue.startedTTRProcessing
 	return queue
 }
@@ -263,15 +254,15 @@ func (queue *Queue) SetReadyAddedCallback(callback ReadyAddedCallback) {
 // TriggerReadyAddedCallback allows you to manually trigger your
 // readyAddedCallback at times when no new items have been added to the ready
 // queue. It will receive the current set of ready item data.
-func (queue *Queue) TriggerReadyAddedCallback() {
-	queue.readyAdded("triggered")
+func (queue *Queue) TriggerReadyAddedCallback(ctx context.Context) {
+	queue.readyAdded(ctx, "triggered")
 }
 
 // readyAdded checks if a readyAddedCallback has been set, and if so calls it
 // in a go routine. It never runs the callback concurrently though: if it is
 // still running from a previous call, we only schedule that the callback be
 // called (once) after the current call completes.
-func (queue *Queue) readyAdded(source string) {
+func (queue *Queue) readyAdded(ctx context.Context, source string) {
 	if queue.readyAddedCb != nil {
 		queue.readyAddedCbMutex.Lock()
 		if queue.readyAddedCbRunning {
@@ -291,9 +282,9 @@ func (queue *Queue) readyAdded(source string) {
 				}
 			}
 			queue.mutex.RUnlock()
-			queue.Debug("ready items available, triggering callback", "source", source, "items", len(data))
+			clog.Debug(ctx, "ready items available, triggering callback", "source", source, "items", len(data))
 			queue.readyAddedCb(queue.Name, data)
-			queue.Debug("finished triggering callback for ready items", "source", source, "items", len(data))
+			clog.Debug(ctx, "finished triggering callback for ready items", "source", source, "items", len(data))
 
 			queue.readyAddedCbMutex.Lock()
 			recall := false
@@ -311,7 +302,7 @@ func (queue *Queue) readyAdded(source string) {
 				queue.readyAddedCbMutex.Lock()
 				queue.readyAddedCbRunning = false
 				queue.readyAddedCbRecall = false
-				defer queue.readyAdded("recall")
+				defer queue.readyAdded(ctx, "recall")
 				queue.readyAddedCbMutex.Unlock()
 			}
 		}()
@@ -416,14 +407,14 @@ func (queue *Queue) Stats() *Stats {
 //
 // Add() returns an item, which may have already existed (in which case, nothing
 // was actually added or changed).
-func (queue *Queue) Add(key string, reserveGroup string, data interface{}, priority uint8, delay time.Duration, ttr time.Duration, startQueue SubQueue, deps ...[]string) (*Item, error) {
+func (queue *Queue) Add(ctx context.Context, key string, reserveGroup string, data interface{}, priority uint8, delay time.Duration, ttr time.Duration, startQueue SubQueue, deps ...[]string) (*Item, error) {
 	queue.mutex.Lock()
 	item, err := queue.newItemForAdd(key, reserveGroup, data, priority, 0, delay, ttr)
 	if err != nil {
 		queue.mutex.Unlock()
 		return item, err
 	}
-	queue.handleItemForAdd(item, startQueue, delay, deps...)
+	queue.handleItemForAdd(ctx, item, startQueue, delay, deps...)
 	return item, nil
 }
 
@@ -447,7 +438,7 @@ func (queue *Queue) newItemForAdd(key string, reserveGroup string, data interfac
 
 // handleItemForAdd checks dependencies and then pushes the item to the desired
 // subqueue. You must hold the mutex lock before calling this. It will unlock.
-func (queue *Queue) handleItemForAdd(item *Item, startQueue SubQueue, delay time.Duration, deps ...[]string) {
+func (queue *Queue) handleItemForAdd(ctx context.Context, item *Item, startQueue SubQueue, delay time.Duration, deps ...[]string) {
 	// check dependencies
 	if len(deps) == 1 && len(deps[0]) > 0 {
 		queue.setItemDependencies(item, deps[0])
@@ -478,7 +469,7 @@ func (queue *Queue) handleItemForAdd(item *Item, startQueue SubQueue, delay time
 			queue.readyQueue.push(item)
 			queue.mutex.Unlock()
 			queue.changed(SubQueueNew, SubQueueReady, []*Item{item})
-			queue.readyAdded("new")
+			queue.readyAdded(ctx, "new")
 		} else {
 			queue.delayQueue.push(item)
 			queue.mutex.Unlock()
@@ -492,14 +483,14 @@ func (queue *Queue) handleItemForAdd(item *Item, startQueue SubQueue, delay time
 // Size alters the way priority is handled. For items with the same priority,
 // the next to be Reserve()d will be the item with the highest size. If they
 // also have the same size, then they will be Reserve()d in fifo order.
-func (queue *Queue) AddWithSize(key string, reserveGroup string, data interface{}, priority uint8, size uint8, delay time.Duration, ttr time.Duration, startQueue SubQueue, deps ...[]string) (*Item, error) {
+func (queue *Queue) AddWithSize(ctx context.Context, key string, reserveGroup string, data interface{}, priority uint8, size uint8, delay time.Duration, ttr time.Duration, startQueue SubQueue, deps ...[]string) (*Item, error) {
 	queue.mutex.Lock()
 	item, err := queue.newItemForAdd(key, reserveGroup, data, priority, size, delay, ttr)
 	if err != nil {
 		queue.mutex.Unlock()
 		return item, err
 	}
-	queue.handleItemForAdd(item, startQueue, delay, deps...)
+	queue.handleItemForAdd(ctx, item, startQueue, delay, deps...)
 	return item, nil
 }
 
@@ -542,7 +533,7 @@ func (queue *Queue) itemHasDeps(item *Item) bool {
 // returns the number that were actually added and the number of items that were
 // not added because they were duplicates of items already in the queue. If an
 // error occurs, nothing will have been added.
-func (queue *Queue) AddMany(items []*ItemDef) (added, dups int, err error) {
+func (queue *Queue) AddMany(ctx context.Context, items []*ItemDef) (added, dups int, err error) {
 	queue.mutex.Lock()
 
 	if queue.closed {
@@ -611,7 +602,7 @@ func (queue *Queue) AddMany(items []*ItemDef) (added, dups int, err error) {
 	queue.mutex.Unlock()
 	if len(addedReadyItems) > 0 {
 		queue.changed(SubQueueNew, SubQueueReady, addedReadyItems)
-		queue.readyAdded("new")
+		queue.readyAdded(ctx, "new")
 	}
 	if len(addedDelayItems) > 0 {
 		queue.changed(SubQueueNew, SubQueueDelay, addedDelayItems)
@@ -676,7 +667,7 @@ func (queue *Queue) AllItems() []*Item {
 // the item with Get() (giving you item.Key, item.ReserveGroup, item.Data() and
 // item.UnresolvedDependencies()), and then calling item.Stats() to get
 // stats.Priority, stats.Delay and stats.TTR.
-func (queue *Queue) Update(key string, reserveGroup string, data interface{}, priority uint8, delay time.Duration, ttr time.Duration, deps ...[]string) error {
+func (queue *Queue) Update(ctx context.Context, key string, reserveGroup string, data interface{}, priority uint8, delay time.Duration, ttr time.Duration, deps ...[]string) error {
 	queue.mutex.Lock()
 
 	if queue.closed {
@@ -800,7 +791,7 @@ func (queue *Queue) Update(key string, reserveGroup string, data interface{}, pr
 
 	if addedReady {
 		queue.mutex.Unlock()
-		queue.readyAdded("updated")
+		queue.readyAdded(ctx, "updated")
 		queue.changed(SubQueueDependent, SubQueueReady, []*Item{item})
 	} else {
 		queue.mutex.Unlock()
@@ -1020,7 +1011,7 @@ func (queue *Queue) Touch(key string) error {
 
 // Release is a thread-safe way to switch an item in the run sub-queue to the
 // delay sub-queue, for when the item should be dealt with later, not now.
-func (queue *Queue) Release(key string) error {
+func (queue *Queue) Release(ctx context.Context, key string) error {
 	queue.mutex.Lock()
 
 	if queue.closed {
@@ -1049,7 +1040,7 @@ func (queue *Queue) Release(key string) error {
 		queue.readyQueue.push(item)
 		queue.mutex.Unlock()
 		queue.changed(SubQueueRun, SubQueueReady, []*Item{item})
-		queue.readyAdded("released")
+		queue.readyAdded(ctx, "released")
 	} else {
 		item.restart()
 		queue.delayQueue.push(item)
@@ -1098,7 +1089,7 @@ func (queue *Queue) Bury(key string) error {
 
 // Kick is a thread-safe way to switch an item in the bury sub-queue to the
 // ready sub-queue, for when a previously buried item can now be handled.
-func (queue *Queue) Kick(key string) error {
+func (queue *Queue) Kick(ctx context.Context, key string) error {
 	queue.mutex.Lock()
 
 	if queue.closed {
@@ -1131,13 +1122,13 @@ func (queue *Queue) Kick(key string) error {
 		item.switchBuryReady()
 		queue.mutex.Unlock()
 		queue.changed(SubQueueBury, SubQueueReady, []*Item{item})
-		queue.readyAdded("kicked")
+		queue.readyAdded(ctx, "kicked")
 	}
 	return nil
 }
 
 // Remove is a thread-safe way to remove an item from the queue.
-func (queue *Queue) Remove(key string) error {
+func (queue *Queue) Remove(ctx context.Context, key string) error {
 	queue.mutex.Lock()
 
 	if queue.closed {
@@ -1208,7 +1199,7 @@ func (queue *Queue) Remove(key string) error {
 	queue.mutex.Unlock()
 	if addedReady {
 		queue.changed(SubQueueDependent, SubQueueReady, addedReadyItems)
-		queue.readyAdded("dependent")
+		queue.readyAdded(ctx, "dependent")
 	}
 
 	return nil
@@ -1218,7 +1209,7 @@ func (queue *Queue) Remove(key string) error {
 // depending upon it. You'd want to check this before Remove()ing this item if
 // you're removing it because it was undesired as opposed to complete, as
 // Remove() always triggers dependent items to become ready.
-func (queue *Queue) HasDependents(key string) (bool, error) {
+func (queue *Queue) HasDependents(ctx context.Context, key string) (bool, error) {
 	queue.mutex.Lock()
 	defer queue.mutex.Unlock()
 
@@ -1230,7 +1221,7 @@ func (queue *Queue) HasDependents(key string) (bool, error) {
 	return has, nil
 }
 
-func (queue *Queue) startDelayProcessing() {
+func (queue *Queue) startDelayProcessing(ctx context.Context) {
 	sendStarted := true
 	for {
 		queue.mutex.Lock()
@@ -1271,7 +1262,7 @@ func (queue *Queue) startDelayProcessing() {
 			queue.mutex.Unlock()
 			if addedReady {
 				queue.changed(SubQueueDelay, SubQueueReady, items)
-				queue.readyAdded("delayed")
+				queue.readyAdded(ctx, "delayed")
 			}
 			sendStarted = false
 		case <-queue.delayNotification:
@@ -1294,7 +1285,7 @@ func (queue *Queue) delayNotificationTrigger(item *Item) {
 	}
 }
 
-func (queue *Queue) startTTRProcessing() {
+func (queue *Queue) startTTRProcessing(ctx context.Context) {
 	sendStarted := true
 	for {
 		var sleepTime time.Duration
@@ -1363,7 +1354,7 @@ func (queue *Queue) startTTRProcessing() {
 			}
 			if len(readyItems) > 0 {
 				queue.changed(SubQueueRun, SubQueueReady, readyItems)
-				queue.readyAdded("ttr")
+				queue.readyAdded(ctx, "ttr")
 			}
 			sendStarted = false
 		case <-queue.ttrNotification:

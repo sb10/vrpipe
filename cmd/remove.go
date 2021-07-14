@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package cmd
 
 import (
+	"context"
 	"time"
 
 	"github.com/VertebrateResequencing/wr/jobqueue"
@@ -66,6 +67,7 @@ command line of a job with dependants, you can either:
 2) use the "wr mod" command to modify the command line of the bad job while
    leaving those jobs that are dependant upon it intact.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		set := countGetJobArgs()
 		if set > 1 {
 			die("-f, -i, -l and -a are mutually exclusive; only specify one of them")
@@ -91,7 +93,7 @@ command line of a job with dependants, you can either:
 			desc = "buried"
 		}
 
-		jobs := getJobs(jq, cmdState, cmdAll, 0, false, false)
+		jobs := getJobs(ctx, jq, cmdState, cmdAll, 0, false, false)
 
 		if len(jobs) == 0 {
 			die("No matching jobs found")

@@ -132,6 +132,7 @@ issues:
         - gosec
         - gochecknoglobals
         - gochecknoinits
+        - funlen
     - path: cmd/
       linters:
         - gocyclo

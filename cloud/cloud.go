@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2019, 2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -87,7 +87,7 @@ import (
 
 	"github.com/VertebrateResequencing/wr/internal"
 	"github.com/gofrs/uuid"
-	"github.com/inconshreveable/log15"
+	"github.com/wtsi-ssg/wr/clog"
 	"github.com/wtsi-ssg/wr/fs/local"
 )
 
@@ -203,23 +203,25 @@ type provideri interface {
 	// return the environment variables that might be required to function
 	maybeEnv() []string
 	// do any initial config set up such as authentication
-	initialize(logger log15.Logger) error
+	initialize() error
 	// achieve the aims of Deploy(), recording what you create in resources.Details and resources.PrivateKey
-	deploy(resources *Resources, requiredPorts []int, useConfigDrive bool, gatewayIP, cidr string, dnsNameServers []string) error
+	deploy(ctx context.Context, resources *Resources, requiredPorts []int, useConfigDrive bool, gatewayIP,
+		cidr string, dnsNameServers []string) error
 	// achieve the aims of InCloud()
-	inCloud() bool
+	inCloud(ctx context.Context) bool
 	// return the details of any existing servers, as a slice of the details
 	// returned by spawn
 	getCurrentServers(resources *Resources) ([][]string, error)
 	// achieve the aims of GetQuota()
-	getQuota() (*Quota, error)
+	getQuota(ctx context.Context) (*Quota, error)
 	// return a map of all server flavors, with their flavor ids as keys
-	flavors() map[string]*Flavor
+	flavors(ctx context.Context) map[string]*Flavor
 	// achieve the aims of Spawn(). Must send on the supplied usingQuotaCh as
 	// soon as the new server has been requested and is counted as using up
 	// quota (or the request fails), then create sentinelFilePath once the new
 	// server is in powered up (but not necessarily fully booted up).
-	spawn(resources *Resources, os string, flavor string, diskGB int, externalIP bool, usingQuotaCh chan bool) (serverID, serverIP, serverName, adminPass string, err error)
+	spawn(ctx context.Context, resources *Resources, os string, flavor string, diskGB int, externalIP bool,
+		usingQuotaCh chan bool) (serverID, serverIP, serverName, adminPass string, err error)
 	// achieve the aims of ErrIsNoHardware()
 	errIsNoHardware(err error) bool
 	// achieve the aims of CheckServer()
@@ -227,9 +229,9 @@ type provideri interface {
 	// achieve the aims of serverIsKnown()
 	serverIsKnown(serverID string) (bool, error)
 	// achieve the aims of DestroyServer()
-	destroyServer(serverID string) error
+	destroyServer(ctx context.Context, serverID string) error
 	// achieve the aims of TearDown()
-	tearDown(resources *Resources) error
+	tearDown(ctx context.Context, resources *Resources) error
 }
 
 // Provider gives you access to all of the methods you'll need to interact with
@@ -243,7 +245,6 @@ type Provider struct {
 	madeHeadNode bool
 	servers      map[string]*Server // by name
 	sync.RWMutex
-	log15.Logger
 }
 
 // DeployConfig are the configuration options that you supply to Deploy().
@@ -334,7 +335,7 @@ func AllEnv(providerName string) ([]string, error) {
 // Providing a logger allows for debug messages to be logged somewhere, along
 // with any "harmless" or unreturnable errors. If not supplied, we use a default
 // logger that discards all log messages.
-func New(name string, resourceName string, savePath string, logger ...log15.Logger) (*Provider, error) {
+func New(ctx context.Context, name string, resourceName string, savePath string) (*Provider, error) {
 	var p *Provider
 	switch name {
 	case openstackName:
@@ -346,19 +347,10 @@ func New(name string, resourceName string, savePath string, logger ...log15.Logg
 	p.Name = name
 	p.savePath = savePath + "." + resourceName
 
-	var l log15.Logger
-	if len(logger) == 1 {
-		l = logger[0].New()
-	} else {
-		l = log15.New()
-		l.SetHandler(log15.DiscardHandler())
-	}
-	p.Logger = l
-
 	// load any resources we previously saved, or get an empty set to work
 	// with
 	var err error
-	p.resources, err = p.loadResources(resourceName)
+	p.resources, err = p.loadResources(ctx, resourceName)
 	if err != nil {
 		return nil, err
 	}
@@ -378,13 +370,18 @@ func New(name string, resourceName string, savePath string, logger ...log15.Logg
 		return nil, Error{name, "New", ErrMissingEnv + strings.Join(missingEnv, ", ")}
 	}
 
-	err = p.impl.initialize(l)
+	err = p.impl.initialize()
 	if err != nil {
 		return nil, err
 	}
 
-	p.inCloud = p.impl.inCloud()
+	p.inCloud = p.impl.inCloud(p.cloudContext(ctx))
 	return p, nil
+}
+
+// cloudContext returns a context with a cloud type based on the provider.
+func (p *Provider) cloudContext(ctx context.Context) context.Context {
+	return clog.ContextWithCloudType(ctx, p.Name)
 }
 
 // Deploy triggers the creation of required cloud resources such as networks,
@@ -407,7 +404,7 @@ func New(name string, resourceName string, savePath string, logger ...log15.Logg
 // recovering the sitution; these servers can be retrieved with
 // GetServerByName() and Destroy()ed. Note, however, that they aren't fully
 // useable since we don't know the username needed to ssh to them.
-func (p *Provider) Deploy(config *DeployConfig) error {
+func (p *Provider) Deploy(ctx context.Context, config *DeployConfig) error {
 	gatewayIP := config.GatewayIP
 	if gatewayIP == "" {
 		gatewayIP = defaultGateWayIP
@@ -424,13 +421,13 @@ func (p *Provider) Deploy(config *DeployConfig) error {
 	// impl.deploy should overwrite any existing values in p.resources with
 	// updated values, but should leave other things - such as an existing
 	// PrivateKey when we have not just made a new one - alone
-	err := p.impl.deploy(p.resources, config.RequiredPorts, config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
+	err := p.impl.deploy(p.cloudContext(ctx), p.resources, config.RequiredPorts, config.UseConfigDrive, gatewayIP, cidr, dnsNameServers)
 	if err != nil {
 		return err
 	}
 
 	// save updated resources to disk
-	err = p.saveResources()
+	err = p.saveResources(ctx)
 	if err != nil {
 		return err
 	}
@@ -470,7 +467,6 @@ func (p *Provider) Deploy(config *DeployConfig) error {
 			PrivateKey:   privateKey,
 			provider:     p,
 			cancelRunCmd: make(map[int]chan bool),
-			logger:       p.Logger.New("server", details[0]),
 			created:      false,
 		}
 	}
@@ -487,8 +483,8 @@ func (p *Provider) InCloud() bool {
 
 // GetQuota returns details of the maximum resources the user can request, and
 // the current resources used.
-func (p *Provider) GetQuota() (*Quota, error) {
-	return p.impl.getQuota()
+func (p *Provider) GetQuota(ctx context.Context) (*Quota, error) {
+	return p.impl.getQuota(p.cloudContext(ctx))
 }
 
 // CheapestServerFlavor returns details of the smallest (cheapest) server
@@ -500,13 +496,13 @@ func (p *Provider) GetQuota() (*Quota, error) {
 // during Spawn() you will request a certain amount of disk space, and if that
 // is larger than the flavor's root disk a larger volume will be created
 // automatically.
-func (p *Provider) CheapestServerFlavor(cores, ramMB int, regex string) (*Flavor, error) {
+func (p *Provider) CheapestServerFlavor(ctx context.Context, cores, ramMB int, regex string) (*Flavor, error) {
 	r, err := p.regexStrToRegexp(regex)
 	if err != nil {
 		return nil, err
 	}
 
-	f := p.pickCheapestFlavorFromSubset(cores, ramMB, r, []*regexp.Regexp{})
+	f := p.pickCheapestFlavorFromSubset(ctx, cores, ramMB, r, []*regexp.Regexp{})
 	if f == nil {
 		return nil, Error{"cloud", "CheapestServerFlavor", ErrNoFlavor}
 	}
@@ -531,11 +527,12 @@ func (p *Provider) regexStrToRegexp(regex string) (*regexp.Regexp, error) {
 // at least one of the regexps in the subset. regexp can be nil to match any
 // flavor, and subset can be empty to pick from the superset, but subset
 // elements cannot be nil.
-func (p *Provider) pickCheapestFlavorFromSubset(cores, ramMB int, regexp *regexp.Regexp, subset []*regexp.Regexp) *Flavor {
+func (p *Provider) pickCheapestFlavorFromSubset(ctx context.Context, cores, ramMB int, regexp *regexp.Regexp, subset []*regexp.Regexp) *Flavor {
 	// from flavours in the subset, pick the one that has the lowest ram, disk
 	// and cpus that meet our minimums, and also matches the regex
 	var fr *Flavor
-	for _, f := range p.impl.flavors() {
+
+	for _, f := range p.impl.flavors(p.cloudContext(ctx)) {
 		if regexp != nil && !regexp.MatchString(f.Name) {
 			continue
 		}
@@ -588,9 +585,10 @@ func (p *Provider) pickCheapestFlavorFromSubset(cores, ramMB int, regexp *regexp
 //
 // In the special case that sets is an empty slice, returns the result of
 // CheapestServerFlavor() in a 1 element slice.
-func (p *Provider) CheapestServerFlavors(cores, ramMB int, regex string, sets [][]string) ([]*Flavor, error) {
+func (p *Provider) CheapestServerFlavors(ctx context.Context, cores, ramMB int,
+	regex string, sets [][]string) ([]*Flavor, error) {
 	if len(sets) == 0 {
-		f, err := p.CheapestServerFlavor(cores, ramMB, regex)
+		f, err := p.CheapestServerFlavor(ctx, cores, ramMB, regex)
 		return []*Flavor{f}, err
 	}
 
@@ -612,7 +610,8 @@ func (p *Provider) CheapestServerFlavors(cores, ramMB int, regex string, sets []
 			}
 			subset[j] = rf
 		}
-		matches[i] = p.pickCheapestFlavorFromSubset(cores, ramMB, r, subset)
+
+		matches[i] = p.pickCheapestFlavorFromSubset(ctx, cores, ramMB, r, subset)
 	}
 
 	return matches, nil
@@ -620,8 +619,8 @@ func (p *Provider) CheapestServerFlavors(cores, ramMB int, regex string, sets []
 
 // GetServerFlavor returns the flavor with the given ID or name. If no flavor
 // exactly matches you will get an error matching ErrBadFlavor.
-func (p *Provider) GetServerFlavor(idOrName string) (*Flavor, error) {
-	flavors := p.impl.flavors()
+func (p *Provider) GetServerFlavor(ctx context.Context, idOrName string) (*Flavor, error) {
+	flavors := p.impl.flavors(p.cloudContext(ctx))
 	fr, existed := flavors[idOrName]
 
 	if !existed {
@@ -675,8 +674,9 @@ type SpawnUsingQuotaCallback func()
 // NB: the server will likely not be ready to use yet, having not completed its
 // boot up; call server.WaitUntilReady() before trying to use the server for
 // anything.
-func (p *Provider) Spawn(os string, osUser string, flavorID string, diskGB int, ttd time.Duration, externalIP bool, usingQuotaCB ...SpawnUsingQuotaCallback) (*Server, error) {
-	f, found := p.impl.flavors()[flavorID]
+func (p *Provider) Spawn(ctx context.Context, os string, osUser string, flavorID string,
+	diskGB int, ttd time.Duration, externalIP bool, usingQuotaCB ...SpawnUsingQuotaCallback) (*Server, error) {
+	f, found := p.impl.flavors(p.cloudContext(ctx))[flavorID]
 	if !found {
 		return nil, Error{"cloud", "Spawn", ErrBadFlavor}
 	}
@@ -689,7 +689,9 @@ func (p *Provider) Spawn(os string, osUser string, flavorID string, diskGB int, 
 			usingQuotaCB[0]()
 		}
 	}()
-	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(p.resources, os, flavorID, diskGB, externalIP, usingQuota)
+
+	serverID, serverIP, serverName, adminPass, err := p.impl.spawn(p.cloudContext(ctx), p.resources, os,
+		flavorID, diskGB, externalIP, usingQuota)
 
 	if err != nil {
 		return nil, err
@@ -713,7 +715,6 @@ func (p *Provider) Spawn(os string, osUser string, flavorID string, diskGB int, 
 		TTD:          ttd,
 		provider:     p,
 		cancelRunCmd: make(map[int]chan bool),
-		logger:       p.Logger.New("server", serverID),
 		created:      true,
 	}
 
@@ -730,7 +731,7 @@ func (p *Provider) Spawn(os string, osUser string, flavorID string, diskGB int, 
 		// update resources and save to disk
 		p.resources.Servers[serverID] = server
 		p.Unlock()
-		err = p.saveResources()
+		err = p.saveResources(ctx)
 	} else {
 		p.Unlock()
 	}
@@ -748,7 +749,7 @@ func (p *Provider) ErrIsNoHardware(err error) bool {
 // via Spawn() or Servers()) indicates it is working fine. (If it's not and
 // was previously thought to be a spawned server with an external IP, then it
 // will be removed from the results of Servers().)
-func (p *Provider) CheckServer(serverID string) (working bool, err error) {
+func (p *Provider) CheckServer(ctx context.Context, serverID string) (working bool, err error) {
 	working, err = p.impl.checkServer(serverID)
 
 	if err == nil && !working {
@@ -757,7 +758,7 @@ func (p *Provider) CheckServer(serverID string) (working bool, err error) {
 		if _, present := p.resources.Servers[serverID]; present {
 			delete(p.resources.Servers, serverID)
 			p.Unlock()
-			err = p.saveResources()
+			err = p.saveResources(ctx)
 		} else {
 			p.Unlock()
 		}
@@ -778,8 +779,8 @@ func (p *Provider) ServerIsKnown(serverID string) (known bool, err error) {
 
 // DestroyServer destroys a server given its id, that you would have gotten from
 // the ID property of Spawn()'s return value.
-func (p *Provider) DestroyServer(serverID string) error {
-	err := p.impl.destroyServer(serverID)
+func (p *Provider) DestroyServer(ctx context.Context, serverID string) error {
+	err := p.impl.destroyServer(p.cloudContext(ctx), serverID)
 	if err != nil {
 		return err
 	}
@@ -788,7 +789,8 @@ func (p *Provider) DestroyServer(serverID string) error {
 	p.Lock()
 	delete(p.resources.Servers, serverID)
 	p.Unlock()
-	return p.saveResources()
+
+	return p.saveResources(ctx)
 }
 
 // Servers returns a mapping of serverID => *Server for all servers that were
@@ -857,7 +859,6 @@ func (p *Provider) LocalhostServer(os string, postCreationScript []byte, configF
 		Disk:         diskSize,
 		provider:     p,
 		cancelRunCmd: make(map[int]chan bool),
-		logger:       p.Logger.New("server", "localhost"),
 	}, nil
 }
 
@@ -874,10 +875,10 @@ func (p *Provider) PrivateKey() string {
 // prefixed with the resourceName given to the initial New() call. If currently
 // running on a cloud server, however, it will not delete anything needed by
 // this server, including the resource file that contains the private key.
-func (p *Provider) TearDown() error {
+func (p *Provider) TearDown(ctx context.Context) error {
 	p.RLock()
 	defer p.RUnlock()
-	err := p.impl.tearDown(p.resources)
+	err := p.impl.tearDown(p.cloudContext(ctx), p.resources)
 	if err != nil {
 		return err
 	}
@@ -895,14 +896,15 @@ func (p *Provider) TearDown() error {
 
 // saveResources saves our resources to our savePath, overwriting any existing
 // content.
-func (p *Provider) saveResources() error {
+func (p *Provider) saveResources(ctx context.Context) error {
 	p.Lock()
 	defer p.Unlock()
 	file, err := os.OpenFile(p.savePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
-	defer internal.LogClose(p.Logger, file, "resource file", "path", p.savePath)
+
+	defer internal.LogClose(p.cloudContext(ctx), file, "resource file", "path", p.savePath)
 
 	encoder := gob.NewEncoder(file)
 	return encoder.Encode(p.resources)
@@ -910,7 +912,7 @@ func (p *Provider) saveResources() error {
 
 // loadResources loads our resources from our savePath, or returns an empty
 // set of resources if savePath doesn't exist.
-func (p *Provider) loadResources(resourceName string) (*Resources, error) {
+func (p *Provider) loadResources(ctx context.Context, resourceName string) (*Resources, error) {
 	resources := &Resources{ResourceName: resourceName, Details: make(map[string]string), Servers: make(map[string]*Server)}
 	if _, serr := os.Stat(p.savePath); os.IsNotExist(serr) {
 		return resources, nil
@@ -920,7 +922,8 @@ func (p *Provider) loadResources(resourceName string) (*Resources, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer internal.LogClose(p.Logger, file, "resource file", "path", p.savePath)
+
+	defer internal.LogClose(p.cloudContext(ctx), file, "resource file", "path", p.savePath)
 
 	decoder := gob.NewDecoder(file)
 	err = decoder.Decode(resources)
@@ -932,7 +935,6 @@ func (p *Provider) loadResources(resourceName string) (*Resources, error) {
 	for _, server := range resources.Servers {
 		server.provider = p
 		server.cancelRunCmd = make(map[int]chan bool)
-		server.logger = p.Logger.New("server", server.ID)
 	}
 	return resources, nil
 }

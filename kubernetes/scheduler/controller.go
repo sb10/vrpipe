@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -27,6 +27,7 @@ going on inside a cluster.
 */
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -244,7 +245,7 @@ func NewController(
 // blocks until stopCh is closed, at which point it'll shut down workqueue and
 // wait for workers to finish processing. Threadiness determines how many
 // workers, pod alive and req check handlers to run.
-func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
+func (c *Controller) Run(ctx context.Context, threadiness int, stopCh <-chan struct{}) error {
 	c.Logger = c.opts.Logger.New("schedulerController", "kubernetes")
 	kubeLogFile := filepath.Join(c.opts.ManagerDir, kubeSchedulerControllerLog)
 	fh, err := log15.FileHandler(kubeLogFile, log15.LogfmtFormat())
@@ -271,7 +272,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 	for i := 0; i < threadiness; i++ {
 		go c.reqCheckHandler(stopCh)
 		go c.podAliveHandler(stopCh)
-		go c.processItems(stopCh)
+		go c.processItems(ctx, stopCh)
 		time.Sleep(1 * time.Second)
 	}
 
@@ -282,20 +283,20 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 
 // processItems calls processNextWorkItem() repeatedly until the given chan
 // is closed.
-func (c *Controller) processItems(stopCh <-chan struct{}) {
+func (c *Controller) processItems(ctx context.Context, stopCh <-chan struct{}) {
 	for {
 		select {
 		case <-stopCh:
 			return
 		default:
-			c.processNextWorkItem()
+			c.processNextWorkItem(ctx)
 		}
 	}
 }
 
 // processNextWorkItem reads a single work item off the workqueue and attempts
 // to process it, by calling the syncHandler.
-func (c *Controller) processNextWorkItem() {
+func (c *Controller) processNextWorkItem(ctx context.Context) {
 	obj, shutdown := c.workqueue.Get() // this blocks until there's something to get
 	if shutdown {
 		return
@@ -319,13 +320,13 @@ func (c *Controller) processNextWorkItem() {
 
 	// Run syncHandler, passing it the namespace/name key of the resource to
 	// be synced
-	err := c.processItem(key)
+	err := c.processItem(ctx, key)
 	// handleErr will handle adding to the queue again if retries are not
 	// exceeded. If there is no error, it will forget the key.
 	c.handleErr(err, key)
 }
 
-func (c *Controller) processItem(key string) error {
+func (c *Controller) processItem(ctx context.Context, key string) error {
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -363,14 +364,14 @@ func (c *Controller) processItem(key string) error {
 	}
 
 	// Pass the pod to processPod
-	return c.processPod(pod)
+	return c.processPod(ctx, pod)
 }
 
 // processPod implements the logic for how to react to observing a pod in a
 // given state. It currently copies the files passed in at runtime to any pod
 // with a waiting initcontainer, and returns errors status updates and logs via
 // the pod's ErrChan that is stored in c.podAliveMap.
-func (c *Controller) processPod(pod *corev1.Pod) error {
+func (c *Controller) processPod(ctx context.Context, pod *corev1.Pod) error {
 	c.Debug("processPod called", "pod", pod.ObjectMeta.Name)
 	// Assume only 1 init container Given we control this (Deploy() / Spawn()
 	// this is ok)
@@ -381,7 +382,7 @@ func (c *Controller) processPod(pod *corev1.Pod) error {
 		case pod.Status.InitContainerStatuses[0].State.Running != nil:
 			c.Debug("init container running", "pod", pod.ObjectMeta.Name)
 			c.Debug("calling CopyTar", "pod", pod.ObjectMeta.Name, "files", c.opts.Files)
-			err := c.libclient.CopyTar(c.opts.Files, pod)
+			err := c.libclient.CopyTar(ctx, c.opts.Files, pod)
 			// If this errors the controller will not die. It will just be
 			// logged.
 			if err != nil {

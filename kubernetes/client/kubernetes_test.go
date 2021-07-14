@@ -1,4 +1,4 @@
-// Copyright © 2018 Genome Research Limited
+// Copyright © 2018, 2021 Genome Research Limited
 // Author: Theo Barber-Bany <tb15@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -19,6 +19,7 @@
 package client_test
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -43,8 +44,9 @@ var testingNamespace string
 var skip bool
 
 func init() {
+	ctx := context.Background()
 	tc = client.Kubernetesp{}
-	clientset, _, autherr = tc.Authenticate(client.AuthConfig{})
+	clientset, _, autherr = tc.Authenticate(ctx, client.AuthConfig{})
 	if autherr != nil {
 		skip = true
 		return
@@ -60,7 +62,7 @@ func init() {
 		return
 	}
 
-	autherr = tc.Initialize(clientset, testingNamespace)
+	autherr = tc.Initialize(ctx, clientset, testingNamespace)
 
 	_, autherr := clientset.CoreV1().Endpoints(testingNamespace).List(metav1.ListOptions{})
 	if autherr != nil {
@@ -99,6 +101,7 @@ func TestCreateNewNamespace(t *testing.T) {
 
 // Test that the Deploy() call returns without error.
 func TestDeploy(t *testing.T) {
+	ctx := context.Background()
 	if skip {
 		t.Skip("skipping test; failed to access cluster")
 	}
@@ -136,7 +139,7 @@ func TestDeploy(t *testing.T) {
 
 		// Create the deployment we run the init script created from wherever
 		// we've decided to mount it.
-		err = tc.Deploy(c.tempMountPath,
+		err = tc.Deploy(ctx, c.tempMountPath,
 			c.configMountPath+client.DefaultScriptName,
 			c.cmdArgs, configmap.ObjectMeta.Name,
 			c.configMountPath, c.requiredPorts)
@@ -147,6 +150,7 @@ func TestDeploy(t *testing.T) {
 }
 
 func TestSpawn(t *testing.T) {
+	ctx := context.Background()
 	if skip {
 		t.Skip("skipping test; failed to access cluster")
 	}
@@ -195,7 +199,7 @@ func TestSpawn(t *testing.T) {
 
 		// create spawn request we run the init script created from wherever
 		// we've decided to mount it.
-		pod, err := tc.Spawn(c.containerImage, c.tempMountPath,
+		pod, err := tc.Spawn(ctx, c.containerImage, c.tempMountPath,
 			c.configMountPath+client.DefaultScriptName,
 			c.cmdArgs, configmap.ObjectMeta.Name,
 			c.configMountPath, c.resourceReq)
@@ -220,7 +224,7 @@ func TestSpawn(t *testing.T) {
 		}
 
 		// Now delete it
-		err = tc.DestroyPod(pod.ObjectMeta.Name)
+		err = tc.DestroyPod(ctx, pod.ObjectMeta.Name)
 		if err != nil {
 			t.Error(fmt.Errorf("Deleting pod failed: %s", err))
 		}
@@ -281,6 +285,7 @@ func TestCreateInitScriptConfigMapFromFile(t *testing.T) {
 
 // Must be called after deploy()
 func TestTearDown(t *testing.T) {
+	ctx := context.Background()
 	if skip {
 		t.Skip("skipping test; failed to access cluster")
 	}
@@ -292,11 +297,11 @@ func TestTearDown(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		err := tc.TearDown(c.namespaceName)
+		err := tc.TearDown(ctx, c.namespaceName)
 		if err != nil {
 			t.Error(err.Error())
 		}
-		err = tc.TearDown(c.namespaceName)
+		err = tc.TearDown(ctx, c.namespaceName)
 		if err == nil {
 			t.Error("TearDown should fail if called twice with the same input.")
 		}

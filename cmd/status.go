@@ -19,6 +19,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -94,6 +95,7 @@ name to just the first letter, eg. -o c):
     JSON objects. The properties of the JSON objects are described in the
     documentation for wr's REST API.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
 		set := countGetJobArgs()
 		if set > 1 {
 			die("-f, -i and -l are mutually exclusive; only specify one of them")
@@ -120,7 +122,7 @@ name to just the first letter, eg. -o c):
 			showStd = false
 			showEnv = false
 		}
-		jobs := getJobs(jq, cmdState, set == 0, statusLimit, showStd, showEnv)
+		jobs := getJobs(ctx, jq, cmdState, set == 0, statusLimit, showStd, showEnv)
 		showextra := cmdFileStatus == ""
 
 		if fromHost != "" {
@@ -473,7 +475,7 @@ func countGetJobArgs() int {
 	return set
 }
 
-func getJobs(jq *jobqueue.Client, cmdState jobqueue.JobState, all bool, statusLimit int, showStd, showEnv bool) []*jobqueue.Job {
+func getJobs(ctx context.Context, jq *jobqueue.Client, cmdState jobqueue.JobState, all bool, statusLimit int, showStd, showEnv bool) []*jobqueue.Job {
 	var jobs []*jobqueue.Job
 	var err error
 
@@ -497,7 +499,7 @@ func getJobs(jq *jobqueue.Client, cmdState jobqueue.JobState, all bool, statusLi
 		}
 	case cmdFileStatus != "":
 		// parse the supplied commands
-		parsedJobs, _, _ := parseCmdFile(jq, false)
+		parsedJobs, _, _ := parseCmdFile(ctx, jq, false)
 
 		// round-trip via the server to get those that actually exist in
 		// the queue
