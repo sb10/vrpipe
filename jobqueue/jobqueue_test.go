@@ -39,7 +39,6 @@ import (
 
 	sync "github.com/sasha-s/go-deadlock"
 
-	muxfys "github.com/VertebrateResequencing/muxfys/v4"
 	"github.com/VertebrateResequencing/wr/cloud"
 	"github.com/VertebrateResequencing/wr/internal"
 	jqs "github.com/VertebrateResequencing/wr/jobqueue/scheduler"
@@ -6537,7 +6536,11 @@ func TestJobqueueWithMounts(t *testing.T) {
 	Convey("You can bring up a server configured with an S3 db backup", t, func() {
 		s3ServerConfig := serverConfig
 		s3ServerConfig.DBFileBackup = fmt.Sprintf("s3://default@%s/db.bk", s3Path)
-		localBkPath := filepath.Join(filepath.Dir(config.ManagerDbFile), ".db_bk_mount", s3Path, "db.bk.development")
+		localBkPath := config.ManagerDbFile + ".s3backup_tmp"
+		s3BkPath := filepath.Join(s3Path, "db.bk.development")
+		s3BkPath, err := stripBucketFromS3Path(s3BkPath)
+		So(err, ShouldBeNil)
+
 		os.Remove(config.ManagerDbFile)
 		forceBackups = true
 		defer func() {
@@ -6550,41 +6553,13 @@ func TestJobqueueWithMounts(t *testing.T) {
 			// stop the server
 			server.Stop(true)
 
-			// and delete the db.bk file in s3, which means we need to mount the
-			// thing ourselves
-			accessorConfig, err := muxfys.S3ConfigFromEnvironment("default", s3Path)
-			if err != nil {
-				return
-			}
-			accessor, err := muxfys.NewS3Accessor(accessorConfig)
-			if err != nil {
-				return
-			}
-			remoteConfig := &muxfys.RemoteConfig{
-				Accessor: accessor,
-				Write:    true,
-			}
-			cfg := &muxfys.Config{
-				Mount:   filepath.Dir(localBkPath),
-				Retries: 10,
-			}
-			fs, err := muxfys.New(cfg)
-			if err != nil {
-				return
-			}
-			err = fs.Mount(remoteConfig)
-			if err != nil {
-				return
-			}
-			fs.UnmountOnDeath()
-			os.Remove(localBkPath)
-			err = fs.Unmount()
-			if err != nil {
-				fmt.Printf("fs.Unmount failed: %s", err)
+			errd := server.db.s3accessor.DeleteFile(s3BkPath)
+			if errd != nil {
+				t.Logf("deleting s3 db backup failed: %s", errd)
 			}
 		}()
 
-		_, err := os.Stat(config.ManagerDbFile)
+		_, err = os.Stat(config.ManagerDbFile)
 		So(err, ShouldBeNil)
 		_, err = os.Stat(localBkPath)
 		So(err, ShouldNotBeNil)
@@ -6606,9 +6581,15 @@ func TestJobqueueWithMounts(t *testing.T) {
 			info, err := os.Stat(config.ManagerDbFile)
 			So(err, ShouldBeNil)
 			So(info.Size(), ShouldEqual, 32768)
+			_, err = os.Stat(localBkPath)
+			So(err, ShouldNotBeNil)
+
+			server.db.s3accessor.DownloadFile(s3BkPath, localBkPath)
 			info2, err := os.Stat(localBkPath)
 			So(err, ShouldBeNil)
 			So(info2.Size(), ShouldEqual, 28672)
+			err = os.Remove(localBkPath)
+			So(err, ShouldBeNil)
 
 			Convey("You can stop the server, delete the database, and it will be restored from S3 backup", func() {
 				jobsByRepGroup, err := jq.GetByRepGroup("manually_added", false, 0, "", false, false)
@@ -6644,9 +6625,15 @@ func TestJobqueueWithMounts(t *testing.T) {
 				info, err = os.Stat(config.ManagerDbFile)
 				So(err, ShouldBeNil)
 				So(info.Size(), ShouldEqual, 28672)
-				info2, err = os.Stat(localBkPath)
+				_, err = os.Stat(localBkPath)
+				So(err, ShouldNotBeNil)
+
+				server.db.s3accessor.DownloadFile(s3BkPath, localBkPath)
+				info2, err := os.Stat(localBkPath)
 				So(err, ShouldBeNil)
 				So(info2.Size(), ShouldEqual, 28672)
+				err = os.Remove(localBkPath)
+				So(err, ShouldBeNil)
 
 				jq, err = Connect(addr, config.ManagerCAFile, config.ManagerCertDomain, token, clientConnectTime)
 				So(err, ShouldBeNil)
@@ -6659,10 +6646,6 @@ func TestJobqueueWithMounts(t *testing.T) {
 	})
 
 	Convey("You can connect and run commands that rely on files in a remote S3 object store", t, func() {
-		// pwd, err := os.Getwd()
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
 		cwd, err := os.MkdirTemp("", "wr_jobqueue_test_s3_dir_")
 		if err != nil {
 			log.Fatal(err)

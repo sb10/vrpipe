@@ -1,4 +1,4 @@
-// Copyright © 2016-2019 Genome Research Limited
+// Copyright © 2016-2021 Genome Research Limited
 // Author: Sendu Bala <sb10@sanger.ac.uk>.
 //
 //  This file is part of wr.
@@ -101,9 +101,10 @@ func (s sobsd) Less(i, j int) bool {
 type sobsdStorer func(bucket []byte, encodes sobsd) (err error)
 
 type db struct {
-	backupLast time.Time
-	backupPath string
-	ch         codec.Handle
+	backupLast    time.Time
+	backupPath    string
+	backupPathTmp string
+	ch            codec.Handle
 	log15.Logger
 	backupStopWait       chan bool
 	backupMount          *muxfys.MuxFys
@@ -119,6 +120,7 @@ type db struct {
 	backupFinal    bool
 	backupQueued   bool
 	backupsEnabled bool
+	s3accessor     *muxfys.S3Accessor
 	closed         bool
 	slowBackups    bool // just for testing purposes
 }
@@ -137,14 +139,21 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 	l := logger.New()
 
 	var backupsEnabled bool
-	bkPath := dbBkFile
-	var fs *muxfys.MuxFys
+
+	var accessor *muxfys.S3Accessor
+
+	backupPathTmp := dbBkFile + ".tmp"
+
+	var msg string
+
 	if deployment == internal.Production || forceBackups {
 		backupsEnabled = true
+
 		if internal.InS3(dbBkFile) {
 			if deployment == internal.Development {
 				dbBkFile += "." + deployment
 			}
+
 			path := strings.TrimPrefix(dbBkFile, internal.S3Prefix)
 			pp := strings.Split(path, "@")
 			profile := "default"
@@ -152,39 +161,32 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 				profile = pp[0]
 				path = pp[1]
 			}
-			base := filepath.Base(path)
 			path = filepath.Dir(path)
-
-			mnt := filepath.Join(filepath.Dir(dbFile), ".db_bk_mount", path)
-			bkPath = filepath.Join(mnt, base)
 
 			accessorConfig, err := muxfys.S3ConfigFromEnvironment(profile, path)
 			if err != nil {
 				return nil, "", err
 			}
-			accessor, err := muxfys.NewS3Accessor(accessorConfig)
-			if err != nil {
-				return nil, "", err
-			}
-			remoteConfig := &muxfys.RemoteConfig{
-				Accessor: accessor,
-				Write:    true,
-			}
-			muxfys.SetLogHandler(l.GetHandler())
 
-			cfg := &muxfys.Config{
-				Mount:   mnt,
-				Retries: 10,
-			}
-			fs, err = muxfys.New(cfg)
+			accessor, err = muxfys.NewS3Accessor(accessorConfig)
 			if err != nil {
 				return nil, "", err
 			}
-			err = fs.Mount(remoteConfig)
+
+			dbBkFile = filepath.Join(path, filepath.Base(dbBkFile))
+			dbBkFile, err = stripBucketFromS3Path(dbBkFile)
 			if err != nil {
 				return nil, "", err
 			}
-			fs.UnmountOnDeath()
+
+			backupPathTmp = dbFile + ".s3backup_tmp"
+
+			if _, err = os.Stat(dbFile); os.IsNotExist(err) {
+				err = accessor.DownloadFile(dbBkFile, dbFile)
+				if err == nil {
+					msg = "recreated missing db file " + dbFile + " from s3 backup file " + dbBkFile
+				}
+			}
 		}
 	}
 
@@ -193,21 +195,26 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 		if errr != nil && !os.IsNotExist(errr) {
 			l.Warn("Failed to remove database file", "path", dbFile, "err", errr)
 		}
-		errr = os.Remove(bkPath)
+
+		if accessor != nil {
+			errr = accessor.DeleteFile(dbBkFile)
+		} else {
+			errr = os.Remove(dbBkFile)
+		}
+
 		if errr != nil && !os.IsNotExist(errr) {
-			l.Warn("Failed to remove database backup file", "path", bkPath, "err", errr)
+			l.Warn("Failed to remove database backup file", "path", dbBkFile, "err", errr)
 		}
 	}
 
 	var boltdb *bolt.DB
-	var msg string
 	var err error
 	if _, err = os.Stat(dbFile); os.IsNotExist(err) {
-		if _, err = os.Stat(bkPath); os.IsNotExist(err) {
+		if _, err = os.Stat(dbBkFile); os.IsNotExist(err) {
 			boltdb, err = bolt.Open(dbFile, dbFilePermission, nil)
 			msg = "created new empty db file " + dbFile
 		} else {
-			err = copyFile(bkPath, dbFile)
+			err = copyFile(dbBkFile, dbFile)
 			if err != nil {
 				return nil, msg, err
 			}
@@ -218,7 +225,28 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 		boltdb, err = bolt.Open(dbFile, dbFilePermission, nil)
 		if err != nil {
 			// try the backup
-			if _, errbk := os.Stat(dbBkFile); errbk == nil {
+			bkPath := dbBkFile
+			if accessor != nil {
+				bkPath = backupPathTmp
+
+				errdl := accessor.DownloadFile(dbBkFile, bkPath)
+				if errdl != nil {
+					msg = fmt.Sprintf("tried to recreate corrupt (?) db file %s "+
+						"from s3 backup file %s (error with original db file was: %s)",
+						dbFile, dbBkFile, err)
+
+					return nil, msg, errdl
+				}
+
+				defer func() {
+					errr := os.Remove(bkPath)
+					if errr != nil {
+						l.Warn("failed to remove temporary s3 download of database backup", "err", errr)
+					}
+				}()
+			}
+
+			if _, errbk := os.Stat(bkPath); errbk == nil {
 				boltdb, errbk = bolt.Open(bkPath, dbFilePermission, nil)
 				if errbk == nil {
 					origerr := err
@@ -312,15 +340,14 @@ func initDB(dbFile string, dbBkFile string, deployment string, logger log15.Logg
 		envcache:           envcache,
 		ch:                 new(codec.BincHandle),
 		backupsEnabled:     backupsEnabled,
-		backupPath:         bkPath,
+		backupPath:         dbBkFile,
+		backupPathTmp:      backupPathTmp,
 		backupNotification: make(chan bool),
 		backupWait:         minimumTimeBetweenBackups,
 		backupStopWait:     make(chan bool),
+		s3accessor:         accessor,
 		wg:                 waitgroup.New(),
 		Logger:             l,
-	}
-	if fs != nil {
-		dbstruct.backupMount = fs
 	}
 
 	return dbstruct, msg, err
@@ -1635,7 +1662,8 @@ func (db *db) backupToBackupFile(slowBackups bool) {
 	defer db.wg.Done(wgk)
 
 	// create the new backup file with temp name
-	tmpBackupPath := db.backupPath + ".tmp"
+	tmpBackupPath := db.backupPathTmp
+
 	err := db.bolt.View(func(tx *bolt.Tx) error {
 		return tx.CopyFile(tmpBackupPath, dbFilePermission)
 	})
@@ -1653,10 +1681,26 @@ func (db *db) backupToBackupFile(slowBackups bool) {
 			db.Warn("Removing bad database backup file failed", "path", tmpBackupPath, "err", errr)
 		}
 	} else {
-		// backup succeeded, move it over any old backup
-		errr := os.Rename(tmpBackupPath, db.backupPath)
-		if errr != nil {
-			db.Warn("Renaming new database backup file failed", "source", tmpBackupPath, "dest", db.backupPath, "err", errr)
+		// backup succeeded
+		if db.s3accessor != nil {
+			// upload to s3 then delete it
+			errr := db.s3accessor.UploadFile(tmpBackupPath, db.backupPath, "application/octet-stream")
+			if errr != nil {
+				db.Warn("Uploading new database backup file to S3 failed",
+					"source", tmpBackupPath, "dest", db.backupPath, "err", errr)
+			}
+
+			errr = os.Remove(tmpBackupPath)
+
+			if errr != nil {
+				db.Warn("failed to delete temporary backup file after uploading to s3", "path", tmpBackupPath, "err", errr)
+			}
+		} else {
+			// move it over any old backup
+			errr := os.Rename(tmpBackupPath, db.backupPath)
+			if errr != nil {
+				db.Warn("Renaming new database backup file failed", "source", tmpBackupPath, "dest", db.backupPath, "err", errr)
+			}
 		}
 	}
 }
@@ -1677,4 +1721,14 @@ func (db *db) backup(w io.Writer) error {
 		_, txErr := tx.WriteTo(w)
 		return txErr
 	})
+}
+
+// stripBucketFromS3Path removes the first directory from the given path. If
+// there are no directories, returns an error.
+func stripBucketFromS3Path(path string) (string, error) {
+	if idx := strings.IndexByte(path, '/'); idx >= 0 {
+		return path[idx+1:], nil
+	}
+
+	return "", Error{Err: ErrS3DBBackupPath}
 }

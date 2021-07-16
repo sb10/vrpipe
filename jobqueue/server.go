@@ -77,6 +77,7 @@ const (
 	ErrNoServer         = "could not reach the server"
 	ErrMustReserve      = "you must Reserve() a Job before passing it to other methods"
 	ErrDBError          = "failed to use database"
+	ErrS3DBBackupPath   = "invalid S3 database backup path"
 	ErrPermissionDenied = "bad token: permission denied"
 	ErrBeingDrained     = "server is being drained"
 	ErrStopReserving    = "recovered on a new server; you should stop reserving"
